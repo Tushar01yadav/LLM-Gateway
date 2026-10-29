@@ -4,6 +4,52 @@ A reliability layer that sits between your apps and LLM providers. One API in fr
 
 > **Status: in progress.** The reliability and concurrency core is built and tested. Auth, caching, async jobs with a DLQ, cost tracking and full observability are being built next. See [Status](#status) for the exact split.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    Client["Client apps"]
+
+    subgraph GW["LLM Gateway (FastAPI)"]
+        direction TB
+        V["Validate input<br/>resolve alias"]
+        GL["Global limit<br/>load shedding"]
+        R["Router<br/>models.json registry"]
+        subgraph REL["Reliability layer"]
+            direction TB
+            RT["Retries + backoff"]
+            FB["Fallback chains"]
+            CB["Circuit breakers"]
+        end
+        subgraph CON["Concurrency control"]
+            direction TB
+            SEM["Per-provider semaphores"]
+            Q["Bounded queues"]
+        end
+        AD["Provider adapters"]
+        LOG[("Request logs")]
+        EV["SSE event stream"]
+    end
+
+    Client --> V --> GL --> R --> REL --> CON --> AD
+    AD --> GROQ["Groq"]
+    AD --> OR["OpenRouter"]
+    AD --> GEM["Gemini"]
+    AD --> LOG
+    LOG --> EV --> VIZ["Live visualizer"]
+
+    AUTH["Auth + rate limits"] -.-> V
+    CACHE["Response cache"] -.-> R
+    JOBS["Async jobs + DLQ"] -.-> CON
+    COST["Cost tracking + budgets"] -.-> LOG
+    PROM["Prometheus + Grafana"] -.-> EV
+
+    classDef planned stroke-dasharray:5 5,stroke:#888,color:#888
+    class AUTH,CACHE,JOBS,COST,PROM planned
+```
+
+Solid boxes are built. Dashed boxes are planned and slot into the same pipeline.
+
 ## Why this exists
 
 Apps that call LLM providers directly run into the same problems:
@@ -35,7 +81,7 @@ Apps that call LLM providers directly run into the same problems:
 | Observability | Prometheus and Grafana, tracing, alerts | Planned |
 | Security | Prompt-injection and PII guardrails, OWASP LLM Top 10 test suite | Planned |
 
-## Architecture
+## Request flow
 
 ```mermaid
 flowchart TD
