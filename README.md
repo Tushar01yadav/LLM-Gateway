@@ -229,6 +229,3 @@ Numbers will be added here once the load test runs against a mock provider with 
 7. Guardrails and an OWASP LLM Top 10 test suite
 8. Chaos tests, deployment and a write-up on the bugs found in AI-written code
 
-## License
-
-MIT
