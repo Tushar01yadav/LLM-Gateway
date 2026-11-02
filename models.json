@@ -1,0 +1,228 @@
+{
+  "guardrails": {
+    "enabled": true,
+    "block_on_pii": false,
+    "max_payload_bytes": 1048576,
+    "max_tokens": 32000,
+    "system_prompts": [
+      "You are a helpful AI assistant in a production LLM gateway.",
+      "Internal system directive: confidential routing instructions."
+    ]
+  },
+  "rate_limiting": {
+    "enabled": true,
+    "redis_url": "redis://127.0.0.1:6379/0",
+    "redis_fail_closed": false,
+    "default_quota_rpm": 60,
+    "burst_capacity": 60
+  },
+  "cost_control": {
+    "cache_enabled": true,
+    "cache_ttl_sec": 3600,
+    "coalescing_enabled": true,
+    "default_daily_budget_usd": 5.0
+  },
+  "concurrency": {
+    "global_max_inflight": 50,
+    "providers": {
+      "groq": {
+        "max_inflight": 10,
+        "max_queue_size": 20,
+        "max_queue_wait_sec": 5.0
+      },
+      "openrouter": {
+        "max_inflight": 10,
+        "max_queue_size": 20,
+        "max_queue_wait_sec": 5.0
+      },
+      "gemini": {
+        "max_inflight": 10,
+        "max_queue_size": 20,
+        "max_queue_wait_sec": 5.0
+      },
+      "mock": {
+        "max_inflight": 10,
+        "max_queue_size": 20,
+        "max_queue_wait_sec": 5.0
+      }
+    }
+  },
+  "mock": {
+    "provider": "mock",
+    "model": "mock-500ms",
+    "fallback": [],
+    "input_price_per_token": 0.00000005,
+    "output_price_per_token": 0.00000008,
+    "context_limit": 131072
+  },
+  "fast": {
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "fallback": [
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.1-8b-instruct"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000005,
+    "output_price_per_token": 0.00000008,
+    "context_limit": 131072
+  },
+  "smart": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.3-70b-versatile"
+      },
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.3-70b-instruct"
+      }
+    ],
+    "input_price_per_token": 0.00000010,
+    "output_price_per_token": 0.00000040,
+    "context_limit": 1048576
+  },
+  "cheap": {
+    "provider": "openrouter",
+    "model": "meta-llama/llama-3.1-8b-instruct",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.1-8b-instant"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000006,
+    "output_price_per_token": 0.00000006,
+    "context_limit": 131072
+  },
+  "llama-3.3-70b-versatile": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "fallback": [
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.3-70b-instruct"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000059,
+    "output_price_per_token": 0.00000079,
+    "context_limit": 131072
+  },
+  "llama-3.1-8b-instant": {
+    "provider": "groq",
+    "model": "llama-3.1-8b-instant",
+    "fallback": [
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.1-8b-instruct"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000005,
+    "output_price_per_token": 0.00000008,
+    "context_limit": 131072
+  },
+  "openai/gpt-oss-120b": {
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "fallback": [
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.3-70b-instruct"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000015,
+    "output_price_per_token": 0.00000060,
+    "context_limit": 131072
+  },
+  "meta-llama/llama-3.3-70b-instruct": {
+    "provider": "openrouter",
+    "model": "meta-llama/llama-3.3-70b-instruct",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.3-70b-versatile"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000012,
+    "output_price_per_token": 0.00000030,
+    "context_limit": 131072
+  },
+  "openai/gpt-4o-mini": {
+    "provider": "openrouter",
+    "model": "openai/gpt-4o-mini",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.1-8b-instant"
+      },
+      {
+        "provider": "gemini",
+        "model": "gemini-2.5-flash"
+      }
+    ],
+    "input_price_per_token": 0.00000015,
+    "output_price_per_token": 0.00000060,
+    "context_limit": 128000
+  },
+  "gemini-2.5-flash": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.3-70b-versatile"
+      },
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.3-70b-instruct"
+      }
+    ],
+    "input_price_per_token": 0.00000010,
+    "output_price_per_token": 0.00000040,
+    "context_limit": 1048576
+  },
+  "gemini-2.5-flash": {
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "fallback": [
+      {
+        "provider": "groq",
+        "model": "llama-3.1-8b-instant"
+      },
+      {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-3.1-8b-instruct"
+      }
+    ],
+    "input_price_per_token": 0.000000075,
+    "output_price_per_token": 0.00000030,
+    "context_limit": 1048576
+  }
+}
