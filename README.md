@@ -50,6 +50,17 @@ flowchart LR
 
 ---
 
+## 🖥️ Live Observability & Traffic Visualizer
+
+![LLM Gateway Live Topology Visualizer](docs/assets/visualizer_traffic.png)
+
+The built-in **Interactive Topology Visualizer** (`http://localhost:8000/visualize`) offers real-time visual tracking of request lifecycles under varying traffic conditions:
+- **Request Node Traveling:** Watch request nodes travel dynamically across cables in real time—entering at **Client Ingress**, passing through **Auth Wall**, **Token-Bucket Rate Limiter**, **OWASP Input Guard**, and **Cache**, through the **Router** to upstream provider nodes.
+- **Simulating Burst & Sustained Traffic:** Built-in load testing controls allow you to simulate individual requests, steady streams (e.g. 10 requests over 3s), or high-concurrency **Burst Mode** floods (e.g. 50–100+ simultaneous requests).
+- **Safety & Resiliency in Action:** Visually observe how the gateway isolates load: semaphores queue in-flight requests, bulkheads shed excess load (`429 + Retry-After`), and circuit breakers automatically switch from `CLOSED` to `OPEN` to reroute traffic down the fallback cascade when an upstream provider degrades.
+
+---
+
 ## Why This Exists
 
 Applications that invoke upstream LLM providers directly encounter predictable systemic vulnerabilities:
