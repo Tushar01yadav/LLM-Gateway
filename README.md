@@ -50,14 +50,36 @@ flowchart LR
 
 ---
 
-## 🖥️ Live Observability & Traffic Visualizer
+## 📸 Interface Showcase
+
+### 1. Unified LLM Chat Interface
+Operates just like a full-featured, consumer-ready LLM assistant with model switching across multiple providers (`GPT-OSS`, `Llama 3.3 70B`, `Gemini Flash`), voice reactivity, and instant response streaming:
+
+![LLM Gateway Chat Interface](docs/assets/preview_new_chat.png)
+
+---
+
+### 2. Live Observability & Traffic Visualizer
+The built-in **Interactive Topology Visualizer** (`/visualize`) provides real-time tracking of request lifecycles:
+- **Request Node Traveling:** Watch request nodes travel dynamically across cables in real time—entering at **Client Ingress**, passing through **Auth**, **Rate Limiter**, **OWASP Input Guard**, and **Cache**, through the **Router** to upstream provider nodes.
+- **Simulating Burst & Sustained Traffic:** Built-in load testing controls allow you to simulate individual requests, steady streams (e.g. 10 requests over 3s), or high-concurrency **Burst Mode** floods (e.g. 50–100+ simultaneous requests).
+- **Safety & Resiliency in Action:** Visually observe how the gateway isolates load: semaphores queue in-flight requests, bulkheads shed excess load (`429 + Retry-After`), and circuit breakers automatically switch from `CLOSED` to `OPEN` to reroute traffic down the fallback cascade.
 
 ![LLM Gateway Live Topology Visualizer](docs/assets/visualizer_traffic.png)
 
-The built-in **Interactive Topology Visualizer** (`http://localhost:8000/visualize`) offers real-time visual tracking of request lifecycles under varying traffic conditions:
-- **Request Node Traveling:** Watch request nodes travel dynamically across cables in real time—entering at **Client Ingress**, passing through **Auth Wall**, **Token-Bucket Rate Limiter**, **OWASP Input Guard**, and **Cache**, through the **Router** to upstream provider nodes.
-- **Simulating Burst & Sustained Traffic:** Built-in load testing controls allow you to simulate individual requests, steady streams (e.g. 10 requests over 3s), or high-concurrency **Burst Mode** floods (e.g. 50–100+ simultaneous requests).
-- **Safety & Resiliency in Action:** Visually observe how the gateway isolates load: semaphores queue in-flight requests, bulkheads shed excess load (`429 + Retry-After`), and circuit breakers automatically switch from `CLOSED` to `OPEN` to reroute traffic down the fallback cascade when an upstream provider degrades.
+---
+
+### 3. Circuit Breakers & Observability Dashboard
+Inspect provider node health, error trip counters, recovery cooldown timers, and active fallback strategies with real-time status beacons:
+
+![LLM Gateway Observability Dashboard](docs/assets/preview_observability.png)
+
+---
+
+### 4. Real-Time Telemetry & Statistics
+Monitor request throughput, high-availability targets, round-trip latency (P50/P95), token consumption, and provider distribution breakdown:
+
+![LLM Gateway Telemetry & Statistics](docs/assets/preview_stats.png)
 
 ---
 
