@@ -187,7 +187,6 @@ ADMIN_SECRET_KEY=your_secure_admin_key
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-- **Interactive Swagger Docs:** `http://localhost:8000/docs`
 - **Gateway Dashboard & Live Visualizer:** `http://localhost:8000/visualize`
 - **Health Check:** `http://localhost:8000/health`
 
