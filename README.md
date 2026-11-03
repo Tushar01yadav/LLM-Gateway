@@ -1,248 +1,297 @@
 # LLM Gateway
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![OWASP Top 10 for LLMs](https://img.shields.io/badge/OWASP-LLM%20Top%2010%20Compliant-red.svg)](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
-
-An enterprise-grade, high-performance LLM Gateway and reverse proxy built on **FastAPI**. It delivers unified multi-provider model routing, automated failovers with circuit breakers, cost and daily budget governance, OWASP Top 10 security guardrails, rate limiting, an asynchronous job queue with Dead Letter Queue (DLQ) replay, and a real-time observability dashboard.
+A high-performance reliability, security, and governance layer that sits between your applications and LLM providers. One unified API in front, with automated multi-provider failover, concurrency control, OWASP Top 10 guardrails, cost governance, async jobs with a Dead Letter Queue (DLQ), and a live observability visualizer behind it—so a provider outage, traffic spike, or budget overrun never becomes your outage.
 
 ---
 
-## 🏛️ High-Level Architecture
+## Architecture
+
+```mermaid
+flowchart LR
+    Client["Client apps"]
+
+    subgraph GW["LLM Gateway (FastAPI)"]
+        direction TB
+        V["Validate input & alias"]
+        SEC["Security & Auth<br/>Per-key rate limiting"]
+        GR["OWASP Guardrails<br/>Injection & PII scrub"]
+        CG["Cost Guard<br/>Budget & cache check"]
+        GL["Global limit<br/>load shedding"]
+        R["Router<br/>models.json registry"]
+        
+        subgraph REL["Reliability layer"]
+            direction TB
+            RT["Retries + jitter backoff"]
+            FB["Ordered fallback chains"]
+            CB["Circuit breakers"]
+        end
+        
+        subgraph CON["Concurrency control"]
+            direction TB
+            SEM["Per-provider semaphores"]
+            Q["Bounded queues"]
+        end
+        
+        AD["Provider adapters"]
+        SAN["Response sanitization<br/>Secret & prompt scrub"]
+        LOG[("Audit & request logs")]
+        EV["SSE event stream"]
+    end
+
+    Client --> V --> SEC --> GR --> CG --> GL --> R --> REL --> CON --> AD
+    AD --> GROQ["Groq Cloud"]
+    AD --> OR["OpenRouter"]
+    AD --> GEM["Google Gemini"]
+    AD --> SAN --> LOG
+    LOG --> EV --> VIZ["Live Visualizer (/visualize)"]
+
+    JOBS["Async jobs + DLQ (/v1/jobs)"] -.-> CON
+```
+
+---
+
+## Why This Exists
+
+Applications that invoke upstream LLM providers directly encounter predictable systemic vulnerabilities:
+
+| Problem | Without a Gateway | With this Gateway |
+|---|---|---|
+| **Provider outage or rate limit (429)** | The client app crashes | Retries with jitter, then automatically fails over to the next provider |
+| **Traffic spikes & runaway concurrency** | Memory spikes, 429 storms, server failure | Semaphores, bounded queues, and load shedding with `429 + Retry-After` |
+| **Failing provider degradation** | Repeatedly hammered by failing requests | Circuit breaker trips to `OPEN`, skipping failing nodes until health probes pass |
+| **Prompt injection & system prompt leaks** | Vulnerable to DAN exploits & directive theft | Pre-execution regex inspection & automated post-execution secret redaction |
+| **Runaway API token costs** | Unexpected cloud bills | Per-key daily budget caps, token costing, response cache & request coalescing |
+| **Switching models or providers** | Code rewrite and redeployment | Change a single alias configuration line in `models.json` |
+| **Unobservability ("Why is it slow?")** | Blind debugging across distributed APIs | Per-request latency breakdown and real-time SSE traffic visualizer |
+| **Secret management** | API keys distributed across services | Provider keys isolated entirely within the gateway |
+
+---
+
+## Current Status & Feature Matrix
+
+| Area | Feature | State | Implementation Details |
+|---|---|---|---|
+| **Core Proxy** | Unified chat completion API (`/v1/chat`), request validation, latency & token logging | **Built** | `app/main.py` |
+| **Routing** | Intent alias routing (`fast`, `smart`, `cheap`) driven by `models.json` | **Built** | `models.json`, `app/reliability.py` |
+| **Providers** | Native client adapters for **Groq**, **OpenRouter**, and **Google Gemini** | **Built** | `app/reliability.py` |
+| **Reliability** | Error classification, exponential backoff with jitter, ordered fallback chains | **Built** | `app/reliability.py` |
+| **Reliability** | Per-provider circuit breakers (`CLOSED`, `OPEN`, `HALF_OPEN`) | **Built** | `app/reliability.py` |
+| **Concurrency** | Global & per-provider bulkheads, bounded queues, load shedding (`429 + Retry-After`) | **Built** | `app/reliability.py` |
+| **Security** | Gateway API keys, admin verification, sliding-window token bucket (Redis + memory fallback) | **Built** | `app/security.py` |
+| **OWASP Guardrails**| Prompt injection scanner, SSRF private IP blocker, PII/secret scrubbing, system prompt masking | **Built** | `app/guardrails.py`, `docs/security-findings.md` |
+| **Cost & Budget** | Per-model token calculation, daily budget caps, response caching, request coalescing | **Built** | `app/cost.py` |
+| **Async Jobs** | Background job queue (`/v1/jobs`), idempotency keys, Dead Letter Queue (DLQ) with `/replay` | **Built** | `app/jobs.py` |
+| **Observability** | Live visualizer dashboard and real-time Server-Sent Events (`/api/reliability/traffic-stream`) | **Built** | `app/main.py`, `/visualize` |
+| **Observability** | Prometheus metrics export & OpenTelemetry distributed tracing | Planned | Next iteration |
+
+---
+
+## Request Flow
 
 ```mermaid
 flowchart TD
-    Client(["Client Application"]) --> Ingress["FastAPI Gateway Ingress (/v1/chat)"]
-    
-    subgraph Security ["Security & Governance Layer"]
-        Ingress --> Auth["API Key & Token Verification"]
-        Auth --> RateLimit["Sliding Window / Redis Token Bucket"]
-        RateLimit --> Guardrails["OWASP Guardrails Engine\n- Prompt Injection\n- SSRF URL Validator\n- Context & Payload Caps"]
-        Guardrails --> CostGuard["Cost & Budget Guard\n- Daily Budget Cap Check\n- Response Cache (Exact Hash)\n- Request Coalescer"]
+    C[Client Request] --> V[Validate Input & Alias]
+    V -->|Bad input or payload > 1MB| E400[HTTP 400 / 413]
+    V --> AUTH[Verify API Key & Rate Limit]
+    AUTH -->|Quota exceeded| E429_R[HTTP 429 Rate Limit]
+    AUTH --> OWASP[OWASP Guardrails Check]
+    OWASP -->|Prompt injection or SSRF| E400_SEC[HTTP 400 Blocked]
+    OWASP --> COST[Check Daily Budget & Cache]
+    COST -->|Budget depleted| E429_B[HTTP 429 Budget Cap]
+    COST -->|Cache Hit| RET_CACHE[Return Cached Completion]
+    COST --> G[Global Concurrency Limit Check]
+    G -->|Bulkhead saturated| E429_L[HTTP 429 + Retry-After]
+    G --> P[Provider Chain Evaluation]
+    P -->|Chain exhausted or deadline spent| E502[HTTP 502 / 504]
+    P --> SAN[Output Sanitizer: Redact Secrets & System Prompts]
+    SAN --> OK[HTTP 200 Served, Log Latency & Token Spend]
+
+    subgraph Loop["Per-Provider Attempt Loop"]
+        B{Breaker open?} -->|Yes| N[Skip to next provider]
+        B -->|No| S{Slot or queue free?}
+        S -->|No| N
+        S -->|Yes| CALL[Call provider via adapter]
+        CALL -->|429, 5xx, or Timeout| R[Count error, backoff with jitter, try next]
+        CALL -->|4xx Client Error| N
+        CALL -->|Success| RECORD[Reset breaker fail count, return payload]
     end
-    
-    subgraph Routing ["Reliability & Fallback Router"]
-        CostGuard --> CB["Circuit Breakers\n(Closed / Open / Half-Open)"]
-        CB -->|Primary| Groq["Groq Cloud API"]
-        CB -->|Fallback 1| OpenRouter["OpenRouter API"]
-        CB -->|Fallback 2| Gemini["Google Gemini API"]
-    end
-    
-    subgraph OutputSanitization ["Output Sanitization Layer"]
-        Groq --> Sanitize["Response Scrubbing\n- API Key Redaction\n- PII & Secret Scrubbing\n- System Prompt Redaction"]
-        OpenRouter --> Sanitize
-        Gemini --> Sanitize
-    end
-    
-    Sanitize --> AuditLog[("Audit & SQLite Logs")]
-    Sanitize --> ClientResponse(["Sanitized Response to Client"])
 ```
 
----
+### Request Outcomes
 
-## ✨ Core Capabilities
-
-### 1. Multi-Provider Fallback & Resiliency
-- **Automated Failover Chains:** Seamless fallback across **Groq**, **OpenRouter**, and **Google Gemini** when an upstream provider experiences rate limits (HTTP 429), server errors (5xx), or network timeouts.
-- **Adaptive Circuit Breakers:** Independent state tracking (`CLOSED`, `OPEN`, `HALF_OPEN`) per provider node with error threshold trip counters, reset timeouts, and exponential backoff with jitter.
-- **Chaos Injection:** Endpoints to test and simulate provider failures and verify failover behavior under load.
-
-### 2. OWASP Top 10 for LLMs Security Wall
-- **LLM01 - Prompt Injection & Jailbreaks:** Pre-execution regex and semantic scanning (`INJECTION_PATTERNS`) blocking prompt overrides and DAN-style payloads.
-- **LLM02 & LLM05 - Secret & Sensitive Data Disclosure:** Real-time output scanning redacting API keys, AWS/GCP tokens, SSNs, credit cards, and running environment variables before response delivery.
-- **LLM06 - SSRF Prevention:** URL scheme and IP address validator blocking private RFC 1918 subnets, loopbacks, and cloud instance metadata (`169.254.169.254`).
-- **LLM07 - System Prompt Protection:** Redacts confidential system directives configured in `models.json` if reflected or coerced in completion outputs.
-- **LLM10 - Unbounded Consumption:** Strict 1MB payload limits, token context thresholds, and fail-safe local token-bucket rate limiting that remains active during Redis outages.
-
-### 3. Cost Governance, Caching & Coalescing
-- **Per-Token Cost Calculation:** Accurate calculation of prompt and completion token costs based on pricing definitions in `models.json`.
-- **Daily Budget Caps:** Per-key hard budget caps with automated cutoff (HTTP 429) to prevent runaway billing.
-- **Response Caching:** In-memory and Redis-backed response caching for idempotent queries.
-- **In-Flight Request Coalescing:** Deduplicates identical concurrent requests to prevent duplicate upstream LLM invocations.
-
-### 4. Asynchronous Jobs & Dead Letter Queue (DLQ)
-- Enqueue long-running generative tasks via `/v1/jobs` for background execution.
-- Dead Letter Queue (`/v1/dlq`) retains permanently failed jobs with full failure diagnostics and a one-click `/replay` endpoint.
-
-### 5. Live Observability & Visualizer Dashboard
-- Real-time Server-Sent Events (SSE) traffic stream via `/api/reliability/traffic-stream`.
-- Visualizer dashboard at `/visualize` displaying active routes, circuit breaker node health, live latencies, and token expenditures.
+| What happens | What the gateway does | Client sees |
+|---|---|---|
+| **Healthy path** | Validate, authenticate, check budget, call provider, sanitize output | `200 OK` |
+| **Oversized payload or invalid input** | Reject before invoking any provider | `400` or `413 Payload Too Large` |
+| **Rate limit exceeded** | Reject via token-bucket limiter (works even if Redis is offline) | `429 Too Many Requests` |
+| **Prompt injection / SSRF detected** | Guardrail engine blocks input | `400 Bad Request (Blocked)` |
+| **Gateway / Provider saturated** | Shed request via semaphore queue check | `429 + Retry-After` |
+| **Breaker open for a provider** | Skip degraded node instantly, attempt next fallback in chain | `200 OK` via fallback |
+| **Provider failure (429, 5xx, timeout)**| Retry with jitter, record error on breaker, fallback to next node | `200 OK` via fallback |
+| **Client error (400, 401, 403)** | Do not retry, do not trip breaker, fallback to next provider | `200 OK` via fallback |
+| **Entire chain exhausted** | Return service error | `502 Bad Gateway` or `504 Gateway Timeout` |
 
 ---
 
-## 📂 Repository Structure
+## Quick Start
 
-```text
-.
-├── app/
-│   ├── main.py            # Primary FastAPI app, reverse proxy, SSE traffic stream & UI routes
-│   ├── reliability.py     # Circuit breakers, upstream provider clients, fallbacks & health checks
-│   ├── security.py        # Gateway API keys, sliding-window rate limiters, token verification
-│   ├── guardrails.py      # OWASP prompt injection scanner, secret redaction, SSRF inspection
-│   ├── cost.py            # Token pricing, budget limits, response cache, request coalescer
-│   ├── jobs.py            # Background job management, async task worker & Dead Letter Queue (DLQ)
-│   └── auth.py            # User authentication, Google OAuth 2.0 flow & session handlers
-├── components/            # UI components and voice-orb visualization primitives
-├── docs/
-│   └── security-findings.md # Comprehensive OWASP security audit matrix and remediation details
-├── scripts/
-│   ├── benchmark_100_requests.py   # Concurrency benchmark script
-│   ├── load_test_concurrency.py    # Multi-worker stress tester
-│   └── proof_dlq_replay.py         # Automated verification for DLQ failover and replay
-├── tests/
-│   ├── test_owasp_guardrails.py    # OWASP Top 10 security regression tests
-│   ├── test_reliability.py         # Circuit breaker and fallback verification
-│   ├── test_async_jobs.py          # Job queue & DLQ test suite
-│   └── test_concurrency_mocked.py  # Concurrency & request coalescing tests
-├── models.json            # Model catalog, context windows, and token pricing matrix
-├── requirements.txt       # Production & test Python dependencies
-├── .env.example           # Environment variable template
-└── .gitignore             # Git exclusion rules (safeguarding keys, DBs, and scratch scripts)
-```
-
----
-
-## 🚀 Quick Start
-
-### 1. Prerequisites
-- **Python:** 3.10 or higher
-- **Optional:** Redis instance (for distributed caching; falls back to in-memory automatically)
-
-### 2. Installation
+### 1. Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/Tushar01yadav/LLM-Gateway.git
+git clone git@github.com:Tushar01yadav/LLM-Gateway.git
 cd "LLM-Gateway"
 
-# Create and activate a virtual environment
-python -m venv venv
+# Create and activate virtual environment
+python -m venv .venv
 
 # Windows (PowerShell):
-.\venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 # Linux / macOS:
-source venv/bin/activate
+source .venv/bin/activate
 
-# Install required packages
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Configure Environment Variables
+### 2. Environment Configuration
 
-Copy the provided template and add your upstream API keys:
+Copy the sample environment file and provide your provider credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Key `.env` parameters:
 ```ini
-# Upstream Providers
 GROQ_API_KEY=gsk_your_groq_api_key
 OPENROUTER_API_KEY=sk-or-your_openrouter_key
 GEMINI_API_KEY=your_gemini_key
-
-# Gateway Admin Token
 ADMIN_SECRET_KEY=your_secure_admin_key
-GATEWAY_ADMIN_TOKEN=your_admin_bearer_token
-
-# Optional: Redis (leave empty or set custom URL)
-REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-### 4. Run the Server
+### 3. Running the Gateway
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-- **Interactive Swagger Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Live Visualizer & Admin Dashboard:** [http://localhost:8000/visualize](http://localhost:8000/visualize)
-- **Health Check:** [http://localhost:8000/health](http://localhost:8000/health)
+- **Interactive Swagger Docs:** `http://localhost:8000/docs`
+- **Gateway Dashboard & Live Visualizer:** `http://localhost:8000/visualize`
+- **Health Check:** `http://localhost:8000/health`
+
+```bash
+# Example chat completion request
+curl -X POST http://localhost:8000/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "fast",
+    "messages": [
+      {"role": "user", "content": "Explain circuit breaker pattern in two sentences."}
+    ]
+  }'
+```
 
 ---
 
-## 📡 Key API Endpoints
+## Configuration (`models.json`)
 
-### Chat Completion (Reverse Proxy)
-```http
-POST /v1/chat
-Content-Type: application/json
-Authorization: Bearer <GATEWAY_API_KEY>
+All routing chains, fallback targets, concurrency quotas, guardrail parameters, and token prices are centrally defined in `models.json`. **No model names or prices are hardcoded in application logic.**
 
+```jsonc
 {
-  "model": "llama-3.3-70b-versatile",
-  "messages": [
-    {"role": "user", "content": "Explain circuit breaker pattern in distributed systems."}
-  ],
-  "temperature": 0.7
+  "guardrails": {
+    "enabled": true,
+    "max_payload_bytes": 1048576,
+    "max_tokens": 32000
+  },
+  "rate_limiting": {
+    "enabled": true,
+    "default_quota_rpm": 60,
+    "burst_capacity": 60
+  },
+  "cost_control": {
+    "cache_enabled": true,
+    "coalescing_enabled": true,
+    "default_daily_budget_usd": 5.0
+  },
+  "concurrency": {
+    "global_max_inflight": 50,
+    "providers": {
+      "groq": { "max_inflight": 10, "max_queue_size": 20, "max_queue_wait_sec": 5.0 }
+    }
+  },
+  "fast": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "fallback": [
+      { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct" },
+      { "provider": "gemini", "model": "gemini-1.5-flash" }
+    ],
+    "input_price_per_token": 0.00000005,
+    "output_price_per_token": 0.0000002,
+    "context_limit": 131072
+  }
 }
 ```
 
-### Async Job Processing & DLQ
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/v1/jobs` | Submit a long-running generation job for asynchronous background processing |
-| `GET` | `/v1/jobs/{job_id}` | Poll execution status and retrieve completion result |
-| `GET` | `/v1/dlq` | List all failed jobs routed to the Dead Letter Queue |
-| `POST` | `/v1/dlq/{job_id}/replay` | Replay a failed job after upstream service recovery |
+---
 
-### Reliability & Circuit Breaker Control
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/api/reliability/status` | Current circuit breaker status and error counts per provider node |
-| `POST` | `/api/reliability/circuit-breaker/trip` | Manually trip a provider circuit breaker (for chaos testing) |
-| `POST` | `/api/reliability/circuit-breaker/reset` | Manually reset a tripped circuit breaker to `CLOSED` |
-| `GET` | `/api/reliability/traffic-stream` | Server-Sent Events (SSE) stream of real-time requests and latencies |
+## Key API Endpoints
 
-### Gateway Security & Key Management
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/api/gateway-keys` | Generate a new gateway API key with custom RPM quota and daily budget |
-| `GET` | `/api/gateway-keys` | List active keys, cumulative spends, and rate limits |
-| `DELETE`| `/api/gateway-keys/{key_id}` | Revoke an existing API key immediately |
-| `GET` | `/api/audit-logs` | Retrieve audit events (pre-sanitized with secret redaction) |
+| Category | Method | Endpoint | Description |
+|---|---|---|---|
+| **Core Proxy** | `POST` | `/v1/chat` | Main unified chat completion endpoint with fallback and guardrails |
+| **Async Queue** | `POST` | `/v1/jobs` | Enqueue background generation task |
+| **Async Queue** | `GET` | `/v1/jobs/{job_id}` | Poll asynchronous job status and completion result |
+| **Dead Letter** | `GET` | `/v1/dlq` | List failed jobs in the Dead Letter Queue |
+| **Dead Letter** | `POST` | `/v1/dlq/{job_id}/replay` | Replay a failed job from the DLQ |
+| **Reliability** | `GET` | `/api/reliability/status` | Real-time circuit breaker states and fallback chain status |
+| **Reliability** | `POST` | `/api/reliability/circuit-breaker/trip` | Manually trip a provider circuit breaker (chaos testing) |
+| **Reliability** | `POST` | `/api/reliability/circuit-breaker/reset`| Reset a tripped circuit breaker to `CLOSED` |
+| **Reliability** | `GET` | `/api/reliability/traffic-stream` | SSE stream for real-time visualizer animations |
+| **Security** | `POST` | `/api/gateway-keys` | Generate a new gateway API key with custom quotas & budgets |
+| **Security** | `GET` | `/api/audit-logs` | Retrieve scrubbed audit trail records |
+| **Cost Control** | `GET` | `/api/cost/metrics` | Retrieve token spend, cost breakdown, and budget usage |
 
 ---
 
-## 🧪 Testing & Verification
+## Design Decisions
 
-Run the complete test suite:
+- **Bulkheads per Provider:** A degraded upstream provider can only saturate its own semaphore pool; other providers remain fully isolated and available.
+- **Saturation Is Not Failure:** A full provider queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers only trip on bona fide errors (5xx, timeouts, connection drops).
+- **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold.
+- **Fail-Safe Rate Limiting:** If Redis goes down or times out, the rate limiter falls back to an in-memory token bucket so traffic is never left completely unthrottled.
+- **Fail Loudly at Startup:** An automated startup check validates every model in every chain to ensure stale aliases surface immediately upon deployment.
+
+---
+
+## Testing
+
 ```bash
+# Run the entire test suite
 pytest tests/ -v
-```
 
-Run specific test modules:
-```bash
-# Verify OWASP Top 10 Guardrails
+# Run mocked unit tests (no external API keys required)
+pytest tests/test_reliability_mocked.py tests/test_concurrency_mocked.py -v
+
+# Run OWASP Top 10 security regression suite
 pytest tests/test_owasp_guardrails.py -v
 
-# Verify Circuit Breakers and Fallbacks
-pytest tests/test_reliability_mocked.py -v
-
-# Verify Async Job Queue and DLQ Replay
+# Run async jobs & DLQ tests
 pytest tests/test_async_jobs.py -v
-```
 
-Execute load and stress testing scripts:
-```bash
-python scripts/benchmark_100_requests.py
+# Run concurrency benchmarks and load testing
 python scripts/load_test_concurrency.py
+python scripts/benchmark_100_requests.py
 ```
 
 ---
 
-## 🤖 AI Ingestion & Analysis Guide
+## AI Ingestion & Analysis Guide
 
-When sharing this repository with AI coding assistants (ChatGPT, Claude, Cursor):
-- **Avoid pasting raw GitHub web URLs in chat:** Web scrapers only fetch the landing page HTML and cannot crawl subfolders or inspect source files.
-- **Claude Projects:** Connect this repository directly via Claude's GitHub integration for full-codebase search and context indexing.
-- **Gitingest / Repomix:** Use [Gitingest](https://gitingest.com) by prefixing `gitingest.com/Tushar01yadav/LLM-Gateway` or run `npx repomix` to bundle clean, token-efficient source context.
-- **Excluded Files:** `.gitignore` automatically excludes `scratch/`, test image artifacts, and binary `.db` files to keep prompt context clean.
-
----
-
-## 📄 License
-
-This project is licensed under the [MIT License](LICENSE).
+When sharing this repository with LLM coding assistants (ChatGPT, Claude, Cursor):
+- **Avoid pasting raw GitHub web URLs:** Browsing tools fetch only the top-level HTML page and cannot inspect source files or navigate directories.
+- **Use Claude Projects:** Connect this repository directly via Claude's GitHub integration for native indexing and search.
+- **Use Gitingest / Repomix:** Prefix the URL with `gitingest.com` (e.g., `https://gitingest.com/Tushar01yadav/LLM-Gateway`) or run `npx repomix` to bundle clean, token-efficient source context.
+- **Clean Context:** Scratch files, local databases, and temporary development artifacts are excluded via `.gitignore` to prevent context token bloat.
