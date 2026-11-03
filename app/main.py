@@ -8630,9 +8630,9 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             const stateBadge = isClosed 
 
-              ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.2)]' 
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-700 dark:bg-emerald-950/80 dark:border-emerald-500/40 dark:text-emerald-300 shadow-sm' 
 
-              : (isOpen ? 'bg-rose-950/80 border-rose-500/40 text-rose-300 shadow-[0_0_10px_rgba(244,63,94,0.3)]' : 'bg-amber-950/80 border-amber-500/40 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.2)]');
+              : (isOpen ? 'bg-rose-50 border-rose-300 text-rose-700 dark:bg-rose-950/80 dark:border-rose-500/40 dark:text-rose-300 shadow-sm' : 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-950/80 dark:border-amber-500/40 dark:text-amber-300 shadow-sm');
 
             const dotClass = isClosed 
 
@@ -8640,13 +8640,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
               : (isOpen ? 'bg-rose-500 animate-ping' : 'bg-amber-400 animate-pulse');
 
-            const provColor = provider === 'groq' ? 'from-orange-500/20 to-transparent border-orange-500/30' : (provider === 'gemini' ? 'from-purple-500/20 to-transparent border-purple-500/30' : 'from-cyan-500/20 to-transparent border-cyan-500/30');
-
             const failPercent = Math.min(100, Math.round(((status.consecutive_failures || 0) / (status.failure_threshold || 5)) * 100));
 
             const card = document.createElement('div');
 
-            card.className = `p-4 rounded-2xl border bg-gradient-to-b ${provColor} bg-[#0c101a] backdrop-blur-xl flex flex-col justify-between hover:border-white/20 transition-all shadow-xl group`;
+            card.className = `p-4 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-[#0c101a] flex flex-col justify-between hover:shadow-xl transition-all shadow-sm group`;
 
             card.innerHTML = `
 
@@ -8658,7 +8656,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                     <span class="w-2.5 h-2.5 rounded-full ${dotClass}"></span>
 
-                    <span class="font-bold text-sm text-white capitalize tracking-wide">${provider}</span>
+                    <span class="font-bold text-sm text-gray-900 dark:text-white capitalize tracking-wide">${provider}</span>
 
                   </div>
 
@@ -8668,21 +8666,21 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                 
 
-                <div class="space-y-2 text-xs text-gray-300 mb-3">
+                <div class="space-y-2 text-xs text-gray-600 dark:text-gray-300 mb-3">
 
                   <div>
 
                     <div class="flex justify-between text-[11px] mb-1">
 
-                      <span class="text-gray-400">Error Trip Threshold:</span>
+                      <span class="text-gray-500 dark:text-gray-400">Error Trip Threshold:</span>
 
-                      <span class="font-mono text-white font-semibold">${status.consecutive_failures || 0} / ${status.failure_threshold || 5}</span>
+                      <span class="font-mono text-gray-900 dark:text-white font-semibold">${status.consecutive_failures || 0} / ${status.failure_threshold || 5}</span>
 
                     </div>
 
-                    <div class="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+                    <div class="w-full bg-gray-200 dark:bg-white/10 rounded-full h-1.5 overflow-hidden">
 
-                      <div class="h-full rounded-full ${failPercent > 60 ? 'bg-rose-500' : 'bg-cyan-400'}" style="width: ${failPercent}%"></div>
+                      <div class="h-full rounded-full ${failPercent > 60 ? 'bg-rose-500' : 'bg-cyan-500'}" style="width: ${failPercent}%"></div>
 
                     </div>
 
@@ -8690,31 +8688,31 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                   <div class="flex justify-between pt-1">
 
-                    <span class="text-gray-400">Total Invocations:</span>
+                    <span class="text-gray-500 dark:text-gray-400">Total Invocations:</span>
 
-                    <span class="font-mono text-cyan-300 font-semibold">${status.total_requests || 0}</span>
+                    <span class="font-mono text-cyan-600 dark:text-cyan-300 font-semibold">${status.total_requests || 0}</span>
 
                   </div>
 
                   <div class="flex justify-between">
 
-                    <span class="text-gray-400">Success / Failures:</span>
+                    <span class="text-gray-500 dark:text-gray-400">Success / Failures:</span>
 
-                    <span class="font-mono text-white"><span class="text-emerald-400">${status.total_successes || 0}</span> / <span class="text-rose-400">${status.total_failures || 0}</span></span>
+                    <span class="font-mono text-gray-900 dark:text-white"><span class="text-emerald-600 dark:text-emerald-400 font-semibold">${status.total_successes || 0}</span> / <span class="text-rose-600 dark:text-rose-400 font-semibold">${status.total_failures || 0}</span></span>
 
                   </div>
 
-                  ${isOpen ? `<div class="text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 bg-rose-950/40 p-1.5 rounded-lg border border-rose-500/30"><span>⏳ Recovery Cooldown:</span> <span class="font-mono font-bold">${status.cooldown_remaining_sec}s</span></div>` : ''}
+                  ${isOpen ? `<div class="text-rose-600 dark:text-rose-400 font-semibold text-[11px] flex items-center gap-1.5 bg-rose-50 dark:bg-rose-950/40 p-1.5 rounded-lg border border-rose-200 dark:border-rose-500/30"><span>⏳ Recovery Cooldown:</span> <span class="font-mono font-bold">${status.cooldown_remaining_sec}s</span></div>` : ''}
 
                 </div>
 
               </div>
 
-              <div class="flex items-center gap-1.5 pt-2 border-t border-white/10">
+              <div class="flex items-center gap-1.5 pt-2 border-t border-gray-150 dark:border-white/10">
 
-                <button type="button" onclick="tripSingleCircuitBreaker('${provider}')" class="flex-1 py-1 rounded-lg text-[10px] font-bold bg-white/5 hover:bg-rose-950/40 text-gray-400 hover:text-rose-300 border border-white/10 hover:border-rose-500/30 transition cursor-pointer">Simulate Trip</button>
+                <button type="button" onclick="tripSingleCircuitBreaker('${provider}')" class="flex-1 py-1 rounded-lg text-[10px] font-bold bg-gray-100 hover:bg-rose-50 text-gray-700 hover:text-rose-600 dark:bg-white/5 dark:hover:bg-rose-950/40 dark:text-gray-400 dark:hover:text-rose-300 border border-gray-200 dark:border-white/10 transition cursor-pointer">Simulate Trip</button>
 
-                <button type="button" onclick="resetSingleCircuitBreaker('${provider}')" class="flex-1 py-1 rounded-lg text-[10px] font-bold bg-white/5 hover:bg-emerald-950/40 text-gray-400 hover:text-emerald-300 border border-white/10 hover:border-emerald-500/30 transition cursor-pointer">Reset</button>
+                <button type="button" onclick="resetSingleCircuitBreaker('${provider}')" class="flex-1 py-1 rounded-lg text-[10px] font-bold bg-gray-100 hover:bg-emerald-50 text-gray-700 hover:text-emerald-600 dark:bg-white/5 dark:hover:bg-emerald-950/40 dark:text-gray-400 dark:hover:text-emerald-300 border border-gray-200 dark:border-white/10 transition cursor-pointer">Reset</button>
 
               </div>
 
