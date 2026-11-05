@@ -1,18 +1,28 @@
 import asyncio
 
+import base64
+
+import hashlib
+
 import json
 
 import logging
 
 import os
 
+import random
+
+import re
+
+import secrets
+
 import sqlite3
+
+import subprocess
 
 import time
 
 import uuid
-
-from abc import ABC, abstractmethod
 
 from contextlib import asynccontextmanager
 
@@ -24,7 +34,9 @@ from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request, Response, status, Depends, Header
 
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+
+from fastapi.staticfiles import StaticFiles
 
 import urllib.parse
 
@@ -38,6 +50,8 @@ from app.security import (
     RATE_LIMITER,
     verify_admin_auth,
     ADMIN_TOKEN,
+    get_client_ip,
+    check_deploy_config,
 )
 
 from app.cost import (
@@ -51,42 +65,27 @@ from app.cost import (
 
 from app.jobs import JOB_MANAGER
 from app.guardrails import GUARDRAILS, AUDIT_LOGGER
+from app.metrics import latency_percentiles
 
 from app.reliability import (
 
     CIRCUIT_BREAKERS,
 
-    ADAPTER_MAP,
-
-    BaseAdapter,
-
-    GroqAdapter,
-
-    OpenRouterAdapter,
-
-    GeminiAdapter,
-
     load_models_config,
 
-    resolve_fallback_chain,
-
     execute_reliable_completion,
-
-    mask_api_key,
 
     TRAFFIC_BROADCASTER,
 
     NODE_METRICS,
 
-    INJECTED_FAILURES,
-
     set_failure_injection,
+
+    set_injected_latency,
 
     update_provider_api_key,
 
     get_provider_nodes_info,
-
-    LoadShedError,
 
     get_concurrency_metrics,
 
@@ -102,6 +101,14 @@ from app.auth import (
 
     GOOGLE_CONFIG,
 
+    COOKIE_SECURE,
+
+    check_otp_rate_limit,
+
+    db_consume_oauth_state,
+
+    db_create_oauth_state,
+
     db_create_otp,
 
     db_create_session as db_create_user_session,
@@ -110,11 +117,11 @@ from app.auth import (
 
     db_delete_session as db_delete_user_session,
 
+    db_delete_unverified_user,
+
     db_get_oauth_tokens,
 
     db_get_user_by_email,
-
-    db_get_user_by_id,
 
     db_save_oauth_tokens,
 
@@ -129,6 +136,8 @@ from app.auth import (
     generate_avatar_image,
 
     is_valid_email,
+
+    public_user,
 
     verify_password,
 
@@ -264,6 +273,16 @@ def init_db():
 
         pass
 
+    try:
+
+        cursor.execute("ALTER TABLE request_logs ADD COLUMN endpoint TEXT DEFAULT '/v1/chat'")
+
+        conn.commit()
+
+    except Exception:
+
+        pass
+
     conn.commit()
 
     conn.close()
@@ -330,29 +349,19 @@ def db_save_message(
 
     conn.close()
 
-def db_get_sessions(user_id: Optional[int] = None):
+def db_get_sessions(user_id: int):
 
     conn = sqlite3.connect(DB_PATH)
 
     cursor = conn.cursor()
 
-    if user_id is not None:
+    cursor.execute(
 
-        cursor.execute(
+        "SELECT id, title, model, created_at, user_id, user_name, user_email FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
 
-            "SELECT id, title, model, created_at, user_id, user_name, user_email FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
 
-            (user_id,),
-
-        )
-
-    else:
-
-        cursor.execute(
-
-            "SELECT id, title, model, created_at, user_id, user_name, user_email FROM sessions ORDER BY created_at DESC"
-
-        )
+    )
 
     rows = cursor.fetchall()
 
@@ -450,15 +459,41 @@ def db_update_session_title(session_id: str, title: str):
 
     conn.close()
 
-def db_clear_all_sessions():
+def db_get_session_owner(session_id: str) -> Optional[Dict[str, Any]]:
 
     conn = sqlite3.connect(DB_PATH)
 
     cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM messages")
+    cursor.execute("SELECT id, user_id FROM sessions WHERE id = ?", (session_id,))
 
-    cursor.execute("DELETE FROM sessions")
+    row = cursor.fetchone()
+
+    conn.close()
+
+    if not row:
+
+        return None
+
+    return {"id": row[0], "user_id": row[1]}
+
+def db_clear_user_sessions(user_id: int):
+
+    conn = sqlite3.connect(DB_PATH)
+
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id FROM sessions WHERE user_id = ?", (user_id,))
+
+    session_ids = [r[0] for r in cursor.fetchall()]
+
+    if session_ids:
+
+        placeholders = ",".join("?" for _ in session_ids)
+
+        cursor.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", session_ids)
+
+        cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
     conn.commit()
 
@@ -516,6 +551,7 @@ def _db_save_request_log_sync(
     total_tokens: int,
     error_message: Optional[str] = None,
     queue_wait_ms: float = 0.0,
+    endpoint: str = "/v1/chat",
 ):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=15.0)
@@ -523,8 +559,8 @@ def _db_save_request_log_sync(
         cursor.execute(
             """
             INSERT INTO request_logs 
-            (session_id, target, provider, model, status_code, fallback_used, attempts_json, latency_ms, queue_wait_ms, total_tokens, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (session_id, target, provider, model, status_code, fallback_used, attempts_json, latency_ms, queue_wait_ms, total_tokens, error_message, endpoint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -538,6 +574,7 @@ def _db_save_request_log_sync(
                 queue_wait_ms,
                 total_tokens,
                 error_message,
+                endpoint,
             ),
         )
         conn.commit()
@@ -557,6 +594,7 @@ def db_save_request_log(
     total_tokens: int,
     error_message: Optional[str] = None,
     queue_wait_ms: float = 0.0,
+    endpoint: str = "/v1/chat",
 ):
     """Offload SQLite log writes off the asyncio event loop to worker thread."""
     try:
@@ -575,6 +613,7 @@ def db_save_request_log(
             total_tokens,
             error_message,
             queue_wait_ms,
+            endpoint,
         )
     except RuntimeError:
         _db_save_request_log_sync(
@@ -589,6 +628,7 @@ def db_save_request_log(
             total_tokens,
             error_message,
             queue_wait_ms,
+            endpoint,
         )
 
 def init_node_metrics_from_db():
@@ -718,13 +758,11 @@ def check_startup_keys():
 
 # ---------------------------------------------------------
 
-load_model_registry = load_models_config
-
-ADAPTERS = ADAPTER_MAP
-
 @asynccontextmanager
 
 async def lifespan(app: FastAPI):
+
+    check_deploy_config()
 
     check_startup_keys()
 
@@ -754,6 +792,12 @@ app = FastAPI(
 
 )
 
+# Dashboard assets are vendored and pinned (see app/static/vendor); the page
+# also carries SRI hashes so a modified file fails to load.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 class ChatMessage(BaseModel):
 
     role: str
@@ -780,33 +824,59 @@ async def health():
 
     return {"status": "ok"}
 
-@app.get("/api/chats")
+async def require_session_user(request_http: Request) -> Dict[str, Any]:
 
-async def get_chats(request: Request):
-
-    user = None
-
-    token = request.cookies.get("llm_gateway_session")
+    token = request_http.cookies.get("llm_gateway_session")
 
     if not token:
 
-        auth_header = request.headers.get("Authorization")
+        auth_header = request_http.headers.get("Authorization")
 
         if auth_header and auth_header.startswith("Bearer "):
 
             token = auth_header[7:].strip()
 
-    if token:
+    user = await asyncio.to_thread(db_validate_session, token) if token else None
 
-        user = await asyncio.to_thread(db_validate_session, token)
+    if not user:
 
-    user_id = user["id"] if user else None
+        raise HTTPException(
 
-    return await asyncio.to_thread(db_get_sessions, user_id=user_id)
+            status_code=status.HTTP_401_UNAUTHORIZED,
+
+            detail="Authentication required.",
+
+        )
+
+    return user
+
+def _assert_session_owner(session_id: str, user_id: int):
+
+    owner = db_get_session_owner(session_id)
+
+    if not owner:
+
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    if owner["user_id"] != user_id:
+
+        raise HTTPException(status_code=403, detail="Forbidden: chat session belongs to another user")
+
+@app.get("/api/chats")
+
+async def get_chats(request: Request):
+
+    user = await require_session_user(request)
+
+    return await asyncio.to_thread(db_get_sessions, user["id"])
 
 @app.get("/api/chats/{session_id}")
 
-async def get_chat_history(session_id: str):
+async def get_chat_history(session_id: str, request: Request):
+
+    user = await require_session_user(request)
+
+    await asyncio.to_thread(_assert_session_owner, session_id, user["id"])
 
     messages = await asyncio.to_thread(db_get_session_messages, session_id)
 
@@ -818,7 +888,11 @@ class RenameSessionRequest(BaseModel):
 
 @app.delete("/api/chats/{session_id}")
 
-async def delete_chat(session_id: str):
+async def delete_chat(session_id: str, request: Request):
+
+    user = await require_session_user(request)
+
+    await asyncio.to_thread(_assert_session_owner, session_id, user["id"])
 
     await asyncio.to_thread(db_delete_session, session_id)
 
@@ -826,7 +900,11 @@ async def delete_chat(session_id: str):
 
 @app.patch("/api/chats/{session_id}")
 
-async def rename_chat(session_id: str, request: RenameSessionRequest):
+async def rename_chat(session_id: str, request: RenameSessionRequest, request_http: Request):
+
+    user = await require_session_user(request_http)
+
+    await asyncio.to_thread(_assert_session_owner, session_id, user["id"])
 
     new_title = request.title.strip() or "Untitled Chat"
 
@@ -836,15 +914,19 @@ async def rename_chat(session_id: str, request: RenameSessionRequest):
 
 @app.delete("/api/chats")
 
-async def clear_all_chats():
+async def clear_all_chats(request: Request):
 
-    await asyncio.to_thread(db_clear_all_sessions)
+    user = await require_session_user(request)
+
+    await asyncio.to_thread(db_clear_user_sessions, user["id"])
 
     return {"status": "cleared"}
 
 @app.get("/api/chats/storage/metrics")
 
-async def get_chat_storage_metrics():
+async def get_chat_storage_metrics(request: Request):
+
+    await require_session_user(request)
 
     return await asyncio.to_thread(db_get_storage_info)
 
@@ -922,6 +1004,8 @@ def db_get_gateway_stats() -> Dict[str, Any]:
 
         "top_models": top_models,
 
+        "latency_percentiles": latency_percentiles(),
+
     }
 
 @app.get("/api/stats")
@@ -932,13 +1016,13 @@ async def get_stats():
 
 @app.get("/api/logs")
 
-async def get_logs(limit: int = 100):
+async def get_logs(limit: int = 100, admin_auth: bool = Depends(verify_admin_auth)):
 
     return await asyncio.to_thread(db_get_request_logs, limit=limit)
 
 @app.delete("/api/logs")
 
-async def clear_logs():
+async def clear_logs(admin_auth: bool = Depends(verify_admin_auth)):
 
     await asyncio.to_thread(db_clear_request_logs)
 
@@ -952,7 +1036,7 @@ async def get_concurrency_status():
 
 @app.get("/api/reliability/status")
 
-async def get_reliability_status():
+async def get_reliability_status(admin_auth: bool = Depends(verify_admin_auth)):
 
     cb_status = {name: cb.get_status() for name, cb in CIRCUIT_BREAKERS.items()}
 
@@ -972,11 +1056,13 @@ async def get_reliability_status():
 
         "registry_chains": load_models_config(),
 
+        "latency_percentiles": await asyncio.to_thread(latency_percentiles),
+
     }
 
 @app.post("/api/reliability/circuit-breaker/reset")
 
-async def reset_circuit_breakers():
+async def reset_circuit_breakers(admin_auth: bool = Depends(verify_admin_auth)):
 
     for cb in CIRCUIT_BREAKERS.values():
 
@@ -986,7 +1072,7 @@ async def reset_circuit_breakers():
 
 @app.post("/api/reliability/circuit-breaker/trip")
 
-async def trip_circuit_breaker(provider: str):
+async def trip_circuit_breaker(provider: str, admin_auth: bool = Depends(verify_admin_auth)):
 
     cb = CIRCUIT_BREAKERS.get(provider.lower())
 
@@ -1022,6 +1108,16 @@ class FailureInjectPayload(BaseModel):
 
     mode: Optional[str] = "503"
 
+class LatencyInjectPayload(BaseModel):
+
+    provider: str
+
+    latency_ms: int
+
+class RedisChaosPayload(BaseModel):
+
+    action: str
+
 class TestRequestPayload(BaseModel):
 
     target: Optional[str] = "fast"
@@ -1030,79 +1126,25 @@ class TestRequestPayload(BaseModel):
 
     request_id: Optional[str] = None
 
-def verify_admin_or_localhost(request_http: Request):
-
-    """
-
-    Security check for key editing:
-
-    Permits localhost connections (127.0.0.1, ::1, testclient) or active user sessions or admin key.
-
-    Rejects unauthorized remote calls with 403 Forbidden.
-
-    """
-
-    forwarded = request_http.headers.get("x-forwarded-for")
-
-    if forwarded:
-
-        client_host = forwarded.split(",")[0].strip()
-
-    else:
-
-        client_host = request_http.client.host if request_http.client else ""
-
-    is_localhost = client_host in ("127.0.0.1", "::1", "localhost")
-
-    if client_host == "testclient" and not forwarded:
-
-        is_localhost = True
-
-    token = request_http.cookies.get("llm_gateway_session")
-
-    if not token:
-
-        auth_header = request_http.headers.get("Authorization")
-
-        if auth_header and auth_header.startswith("Bearer "):
-
-            token = auth_header[7:].strip()
-
-    is_authenticated = False
-
-    if token:
-
-        user = db_validate_session(token)
-
-        if user:
-
-            is_authenticated = True
-
-    admin_key = request_http.headers.get("X-Admin-Key")
-
-    admin_env = os.getenv("ADMIN_SECRET_KEY")
-
-    is_admin_header = bool(admin_env and admin_key == admin_env)
-
-    if not (is_localhost or is_authenticated or is_admin_header):
-
-        raise HTTPException(
-
-            status_code=status.HTTP_403_FORBIDDEN,
-
-            detail="Forbidden: Key editing requires admin authorization or localhost connection",
-
-        )
-
 @app.get("/api/reliability/provider-nodes")
 
-async def get_provider_nodes():
+async def get_provider_nodes(admin_auth: bool = Depends(verify_admin_auth)):
 
     """Returns provider nodes telemetry. Backend NEVER returns full keys, only masked (***yd)."""
 
     init_node_metrics_from_db()
 
-    return get_provider_nodes_info()
+    nodes = get_provider_nodes_info()
+
+    snapshot = await asyncio.to_thread(latency_percentiles)
+
+    by_provider = snapshot.get("by_provider", {})
+
+    for node in nodes:
+
+        node["percentiles"] = by_provider.get(node["provider"], {})
+
+    return nodes
 
 @app.post("/api/reliability/keys")
 
@@ -1207,17 +1249,19 @@ async def create_async_job(
         session_token = request_http.cookies.get("llm_gateway_session")
         user = await asyncio.to_thread(db_validate_session, session_token) if session_token else None
         if user:
-            key_info = {"id": 0, "name": f"user_{user['id']}", "quota": 60, "daily_budget": 5.0}
+            # Namespaced so idempotency keys are scoped per user, not shared.
+            key_info = {"id": f"user_{user['id']}", "name": f"user_{user['id']}", "quota": 60, "daily_budget": 5.0}
         else:
             raise HTTPException(status_code=401, detail="Unauthorized: Missing Gateway API key")
 
     effective_idempotency = idempotency_key or x_idempotency_key
+    requested_max_tokens = request.max_tokens if request.max_tokens is not None else 1000
     payload_dict = {
         "model": request.model,
         "alias": request.alias,
         "messages": [{"role": m.role, "content": m.content} for m in request.messages],
         "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
+        "max_tokens": max(1, min(int(requested_max_tokens), GUARDRAILS.max_tokens)),
     }
 
     job_info = await JOB_MANAGER.enqueue_job(
@@ -1229,38 +1273,69 @@ async def create_async_job(
     )
     return job_info
 
+def _resolve_job_caller(request_http: Request):
+    """Returns (kind, id): ('admin', None), ('key', key_id), ('user', user_id), or (None, None)."""
+    auth_header = request_http.headers.get("Authorization", "")
+    bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else None
+    candidate = request_http.headers.get("X-Admin-Token") or bearer
+    if candidate and secrets.compare_digest(candidate, ADMIN_TOKEN):
+        return "admin", None
+
+    raw_key = bearer or (request_http.headers.get("X-API-Key") or "").strip()
+    if raw_key:
+        info = validate_gateway_api_key(raw_key.strip())
+        if info:
+            return "key", str(info["id"])
+
+    session_token = request_http.cookies.get("llm_gateway_session")
+    user = db_validate_session(session_token) if session_token else None
+    if user:
+        return "user", str(user["id"])
+    return None, None
+
 @app.get("/v1/jobs/{job_id}")
-async def get_async_job(job_id: str):
+async def get_async_job(job_id: str, request_http: Request):
+    kind, ident = await asyncio.to_thread(_resolve_job_caller, request_http)
+    if kind is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
     job = await JOB_MANAGER.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+
+    if kind == "admin":
+        return job
+    if kind == "key" and job["key_id"] == ident:
+        return job
+    if kind == "user" and job["key_id"] == f"user_{ident}":
+        return job
+    raise HTTPException(status_code=403, detail="Forbidden: job belongs to another caller.")
 
 @app.get("/v1/dlq")
-async def list_dlq_jobs():
+async def list_dlq_jobs(admin_auth: bool = Depends(verify_admin_auth)):
     items = await JOB_MANAGER.list_dlq()
     return items
 
 @app.get("/v1/dlq/{job_id}")
-async def inspect_dlq_job(job_id: str):
+async def inspect_dlq_job(job_id: str, admin_auth: bool = Depends(verify_admin_auth)):
     job = await JOB_MANAGER.get_job(job_id)
     if not job or job.get("status") != "dlq":
         raise HTTPException(status_code=404, detail="DLQ item not found")
     return job
 
 @app.post("/v1/dlq/{job_id}/replay")
-async def replay_dlq_job(job_id: str):
+async def replay_dlq_job(job_id: str, admin_auth: bool = Depends(verify_admin_auth)):
     res = await JOB_MANAGER.replay_dlq_job(job_id)
     return res
 
 @app.post("/v1/dlq/clear")
 @app.delete("/v1/dlq")
-async def clear_dlq_jobs():
+async def clear_dlq_jobs(admin_auth: bool = Depends(verify_admin_auth)):
     cleared = await JOB_MANAGER.clear_dlq()
     return {"status": "ok", "cleared": cleared}
 
 @app.post("/api/reliability/clear-cache")
-async def api_clear_response_cache():
+async def api_clear_response_cache(admin_auth: bool = Depends(verify_admin_auth)):
     RESPONSE_CACHE.clear()
     if "cache" in NODE_METRICS:
         NODE_METRICS["cache"]["served"] = 0
@@ -1273,7 +1348,7 @@ async def api_get_audit_logs(admin_auth: bool = Depends(verify_admin_auth)):
 
 @app.post("/api/reliability/inject-failure")
 
-async def inject_failure(payload: FailureInjectPayload):
+async def inject_failure(payload: FailureInjectPayload, admin_auth: bool = Depends(verify_admin_auth)):
 
     """Controls: Break this provider toggle for failure injection demo."""
 
@@ -1281,9 +1356,79 @@ async def inject_failure(payload: FailureInjectPayload):
 
     return res
 
+@app.post("/api/reliability/inject-latency")
+
+async def inject_latency(payload: LatencyInjectPayload, admin_auth: bool = Depends(verify_admin_auth)):
+
+    """Controls: set mock-provider latency (ms) for the visualizer chaos panel; 0 clears it."""
+
+    try:
+
+        return set_injected_latency(payload.provider, payload.latency_ms)
+
+    except ValueError as exc:
+
+        raise HTTPException(status_code=400, detail=str(exc))
+
+def _chaos_enabled() -> bool:
+
+    return os.getenv("GATEWAY_ALLOW_CHAOS", "").strip().lower() in ("1", "true", "on", "yes")
+
+@app.post("/api/reliability/redis")
+
+async def redis_chaos(payload: RedisChaosPayload, admin_auth: bool = Depends(verify_admin_auth)):
+
+    """Controls: stop/start the local Redis container. Admin + GATEWAY_ALLOW_CHAOS=1 only.
+
+    Intentionally disabled by default: a production gateway must not expose
+    container control through HTTP just because an admin token is valid.
+    """
+
+    if not _chaos_enabled():
+
+        raise HTTPException(status_code=403, detail="Chaos controls are disabled. Set GATEWAY_ALLOW_CHAOS=1 to enable.")
+
+    action = payload.action.strip().lower()
+
+    if action not in ("down", "up"):
+
+        raise HTTPException(status_code=400, detail="action must be 'down' or 'up'")
+
+    container = os.getenv("GATEWAY_REDIS_CONTAINER", "llm-gateway-redis")
+
+    command = "stop" if action == "down" else "start"
+
+    try:
+
+        proc = await asyncio.create_subprocess_exec(
+            "docker", command, container,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+
+        except asyncio.TimeoutError:
+
+            proc.kill()
+
+            raise HTTPException(status_code=504, detail=f"docker {command} {container} timed out")
+
+    except FileNotFoundError:
+
+        raise HTTPException(status_code=503, detail="docker CLI not available on this host")
+
+    if proc.returncode != 0:
+
+        raise HTTPException(status_code=502, detail=(stderr or stdout).decode(errors="replace")[:300])
+
+    return {"status": "ok", "action": action, "container": container, "output": stdout.decode(errors="replace").strip()[:300]}
+
 @app.get("/api/reliability/traffic-stream")
 
-async def get_traffic_stream(request_http: Request):
+async def get_traffic_stream(request_http: Request, admin_auth: bool = Depends(verify_admin_auth)):
 
     """SSE events: request_started, attempt_started, attempt_failed, fallback, request_served."""
 
@@ -1355,7 +1500,7 @@ TEST_PROMPTS = [
 
 @app.post("/api/reliability/test-request")
 
-async def trigger_test_request(payload: TestRequestPayload):
+async def trigger_test_request(payload: TestRequestPayload, admin_auth: bool = Depends(verify_admin_auth)):
 
     """Controls: Send real traffic test request through the LLM gateway."""
 
@@ -1370,12 +1515,20 @@ async def trigger_test_request(payload: TestRequestPayload):
     test_id = payload.request_id or f"test_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
 
     # Exact-match Redis Cache Check
-    cache_key = build_cache_key(alias=target, model=target, messages=[{"role": "user", "content": prompt_text}], temperature=0.7)
+    cache_key = build_cache_key(
+        scope="admin:test",
+        alias=target,
+        model=target,
+        messages=[{"role": "user", "content": prompt_text}],
+        temperature=0.7,
+        max_tokens=60,
+    )
     cached = await RESPONSE_CACHE.get(cache_key)
     if cached:
         await TRAFFIC_BROADCASTER.broadcast("cache_hit", {"target": target, "request_id": test_id})
         res = dict(cached)
         res["cached"] = True
+        res["session_id"] = test_id
         res["saved_cost"] = res.get("cost_usd", 0.000018)
         res["cost_usd"] = 0.0
         if "cache" in NODE_METRICS:
@@ -1468,6 +1621,8 @@ class GoogleCallbackRequest(BaseModel):
 
     code: str
 
+    state: str
+
 @app.get("/api/auth/google/url")
 
 async def get_google_auth_url():
@@ -1492,6 +1647,18 @@ async def get_google_auth_url():
 
     encoded_redirect = urllib.parse.quote(redirect_uri)
 
+    state = secrets.token_urlsafe(32)
+
+    code_verifier = secrets.token_urlsafe(64)
+
+    code_challenge = base64.urlsafe_b64encode(
+
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+
+    ).rstrip(b"=").decode("ascii")
+
+    await asyncio.to_thread(db_create_oauth_state, state, code_verifier)
+
     auth_url = (
 
         f"https://accounts.google.com/o/oauth2/auth?"
@@ -1508,7 +1675,13 @@ async def get_google_auth_url():
 
         f"prompt=consent&"
 
-        f"include_granted_scopes=true"
+        f"include_granted_scopes=true&"
+
+        f"state={urllib.parse.quote(state)}&"
+
+        f"code_challenge={code_challenge}&"
+
+        f"code_challenge_method=S256"
 
     )
 
@@ -1532,6 +1705,12 @@ async def handle_google_callback(request: GoogleCallbackRequest, response: Respo
 
         raise HTTPException(status_code=500, detail="Google credentials not configured.")
 
+    code_verifier = await asyncio.to_thread(db_consume_oauth_state, request.state.strip())
+
+    if not code_verifier:
+
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state. Please sign in again.")
+
     async with httpx.AsyncClient(timeout=15.0) as client:
 
         token_res = await client.post(
@@ -1549,6 +1728,8 @@ async def handle_google_callback(request: GoogleCallbackRequest, response: Respo
                 "redirect_uri": redirect_uri,
 
                 "grant_type": "authorization_code",
+
+                "code_verifier": code_verifier,
 
             },
 
@@ -1627,15 +1808,27 @@ async def handle_google_callback(request: GoogleCallbackRequest, response: Respo
 
             samesite="lax",
 
+            secure=COOKIE_SECURE,
+
             path="/",
 
         )
 
-        return {"status": "ok", "user": user, "token": session_token}
+        return {"status": "ok", "user": public_user(user), "token": session_token}
+
+def _client_ip(request_http: Request) -> str:
+    return get_client_ip(request_http)
+
+def _ensure_otp_dispatched(dispatch_result: Dict[str, Any]):
+    if not dispatch_result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=dispatch_result.get("message") or "Email delivery is unavailable.",
+        )
 
 @app.post("/api/auth/signup")
 
-async def handle_signup(request: SignupRequest):
+async def handle_signup(request: SignupRequest, request_http: Request):
 
     email = request.email.strip().lower()
 
@@ -1661,6 +1854,11 @@ async def handle_signup(request: SignupRequest):
 
         raise HTTPException(status_code=400, detail="An account with this email already exists. Please sign in.")
 
+    # Rate-limit before writing anything so a 429 cannot leave a user row behind.
+    allowed, reason = await asyncio.to_thread(check_otp_rate_limit, email, _client_ip(request_http))
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
+
     await asyncio.to_thread(
         db_create_user,
         name=name,
@@ -1670,9 +1868,19 @@ async def handle_signup(request: SignupRequest):
         is_verified=False,
     )
 
-    otp_code = await asyncio.to_thread(db_create_otp, email)
+    otp_code = await asyncio.to_thread(db_create_otp, email, 10, _client_ip(request_http))
 
-    dispatch_result = await dispatch_otp_email(email, otp_code)
+    try:
+        dispatch_result = await dispatch_otp_email(email, otp_code)
+        _ensure_otp_dispatched(dispatch_result)
+    except HTTPException:
+        # Signup was rejected after we inserted the account: roll it back so
+        # no orphan/unverified user survives the 503.
+        if existing is None:
+            await asyncio.to_thread(db_delete_unverified_user, email)
+        else:
+            logger.warning("[AUTH] OTP dispatch failed for pre-existing unverified account; leaving it in place.")
+        raise
 
     return {
 
@@ -1681,8 +1889,6 @@ async def handle_signup(request: SignupRequest):
         "email": email,
 
         "message": dispatch_result.get("message"),
-
-        "dev_otp": dispatch_result.get("dev_otp"),
 
         "method": dispatch_result.get("method"),
 
@@ -1722,15 +1928,17 @@ async def handle_verify_otp(request: VerifyOtpRequest, response: Response):
 
         samesite="lax",
 
+        secure=COOKIE_SECURE,
+
         path="/",
 
     )
 
-    return {"status": "verified", "user": user, "token": session_token}
+    return {"status": "verified", "user": public_user(user), "token": session_token}
 
 @app.post("/api/auth/resend-otp")
 
-async def handle_resend_otp(request: ResendOtpRequest):
+async def handle_resend_otp(request: ResendOtpRequest, request_http: Request):
 
     email = request.email.strip().lower()
 
@@ -1740,9 +1948,14 @@ async def handle_resend_otp(request: ResendOtpRequest):
 
         raise HTTPException(status_code=404, detail="Account not found. Please sign up.")
 
-    otp_code = await asyncio.to_thread(db_create_otp, email)
+    allowed, reason = await asyncio.to_thread(check_otp_rate_limit, email, _client_ip(request_http))
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
+
+    otp_code = await asyncio.to_thread(db_create_otp, email, 10, _client_ip(request_http))
 
     dispatch_result = await dispatch_otp_email(email, otp_code)
+    _ensure_otp_dispatched(dispatch_result)
 
     return {
 
@@ -1750,15 +1963,15 @@ async def handle_resend_otp(request: ResendOtpRequest):
 
         "email": email,
 
-        "dev_otp": dispatch_result.get("dev_otp"),
-
         "message": dispatch_result.get("message"),
+
+        "method": dispatch_result.get("method"),
 
     }
 
 @app.post("/api/auth/login")
 
-async def handle_login(request: LoginRequest, response: Response):
+async def handle_login(request: LoginRequest, response: Response, request_http: Request):
 
     email = request.email.strip().lower()
 
@@ -1776,17 +1989,20 @@ async def handle_login(request: LoginRequest, response: Response):
 
     if not user["is_verified"]:
 
-        otp_code = await asyncio.to_thread(db_create_otp, email)
+        allowed, reason = await asyncio.to_thread(check_otp_rate_limit, email, _client_ip(request_http))
+        if not allowed:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
+
+        otp_code = await asyncio.to_thread(db_create_otp, email, 10, _client_ip(request_http))
 
         dispatch_result = await dispatch_otp_email(email, otp_code)
+        _ensure_otp_dispatched(dispatch_result)
 
         return {
 
             "status": "unverified",
 
             "email": email,
-
-            "dev_otp": dispatch_result.get("dev_otp"),
 
             "message": "Account email is unverified. We have sent a verification code to your email.",
 
@@ -1806,11 +2022,13 @@ async def handle_login(request: LoginRequest, response: Response):
 
         samesite="lax",
 
+        secure=COOKIE_SECURE,
+
         path="/",
 
     )
 
-    return {"status": "ok", "user": user, "token": session_token}
+    return {"status": "ok", "user": public_user(user), "token": session_token}
 
 @app.get("/api/auth/me")
 
@@ -1836,7 +2054,7 @@ async def get_current_user(request: Request):
 
         return {"authenticated": False, "user": None}
 
-    return {"authenticated": True, "user": user}
+    return {"authenticated": True, "user": public_user(user)}
 
 @app.post("/api/auth/logout")
 
@@ -1854,7 +2072,7 @@ async def handle_logout(request: Request, response: Response):
 
 @app.get("/api/auth/mailer-status")
 
-async def get_mailer_status():
+async def get_mailer_status(_: bool = Depends(verify_admin_auth)):
 
     tokens = await asyncio.to_thread(db_get_oauth_tokens, "system_mailer")
 
@@ -1904,9 +2122,27 @@ class UpdateProfileRequest(BaseModel):
 
     bg_color: Optional[str] = None
 
+AVATAR_RATE_RPM = 30
+AVATAR_BATCH_MAX = 12
+
+async def _enforce_avatar_quota(user: Dict[str, Any], cost: float):
+    allowed, retry_after, _ = await RATE_LIMITER.check_rate_limit(
+        key_id=f"avatar:user:{user['id']}",
+        quota_rpm=AVATAR_RATE_RPM,
+        cost=cost,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too Many Requests: avatar generation quota exceeded. Please retry in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
 @app.post("/api/user/generate-avatar")
 
-async def api_generate_avatar(body: GenerateAvatarRequest):
+async def api_generate_avatar(body: GenerateAvatarRequest, user: Dict[str, Any] = Depends(require_session_user)):
+
+    await _enforce_avatar_quota(user, 1)
 
     avatar_url = generate_avatar_image(
 
@@ -1926,9 +2162,15 @@ async def api_generate_avatar(body: GenerateAvatarRequest):
 
 @app.post("/api/user/generate-avatars-batch")
 
-async def api_generate_avatars_batch(body: GenerateAvatarsBatchRequest):
+async def api_generate_avatars_batch(body: GenerateAvatarsBatchRequest, user: Dict[str, Any] = Depends(require_session_user)):
 
-    count = min(max(1, body.count), 12)
+    if body.count < 1 or body.count > AVATAR_BATCH_MAX:
+
+        raise HTTPException(status_code=400, detail=f"count must be between 1 and {AVATAR_BATCH_MAX}")
+
+    count = body.count
+
+    await _enforce_avatar_quota(user, count)
 
     start_seed = body.page * count + 1
 
@@ -1984,6 +2226,39 @@ async def api_update_profile(body: UpdateProfileRequest, request: Request):
 
         raise HTTPException(status_code=400, detail="Name cannot be empty")
 
+    # These values are rendered into style/src attributes in the dashboard,
+    # so constrain them at the boundary instead of trusting the browser side.
+    if body.bg_color is not None and body.bg_color.strip():
+
+        if not re.match(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$", body.bg_color.strip()):
+
+            raise HTTPException(status_code=400, detail="bg_color must be a hex color such as #06b6d4")
+
+    if body.picture is not None and body.picture.strip():
+
+        pic = body.picture.strip()
+
+        if len(pic) > 4096:
+
+            raise HTTPException(status_code=400, detail="picture must be an http(s) or data:image URL")
+
+        if pic.startswith("data:image/"):
+
+            if not re.match(r"^data:image/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$", pic):
+
+                raise HTTPException(status_code=400, detail="picture must be a base64 image data URL")
+
+        else:
+
+            parsed_pic = urllib.parse.urlparse(pic)
+
+            if parsed_pic.scheme not in ("http", "https") or not parsed_pic.netloc \
+                    or any(ch in pic for ch in "\"'<>`\\") or any(ch.isspace() for ch in pic):
+
+                raise HTTPException(status_code=400, detail="picture must be an http(s) or data:image URL")
+
+        body.picture = pic
+
     updated_user = await asyncio.to_thread(
         db_update_user_profile,
         user_id=user["id"],
@@ -2009,11 +2284,31 @@ async def api_update_profile(body: UpdateProfileRequest, request: Request):
 
         logger.warning(f"Could not sync sessions user_name: {e}")
 
-    return {"status": "ok", "user": updated_user}
+    return {"status": "ok", "user": public_user(updated_user)}
+
+def _set_public_response_headers(
+    response: Response,
+    *,
+    request_id: str,
+    provider: str,
+    model: str,
+    fallback_used: bool,
+    latency_ms: float,
+    cost_usd: float,
+) -> None:
+
+    """Stable, non-sensitive routing metadata for clients and logs."""
+
+    response.headers["X-Request-Id"] = str(request_id)
+    response.headers["X-Provider"] = str(provider)
+    response.headers["X-Model"] = str(model)
+    response.headers["X-Fallback-Used"] = "true" if fallback_used else "false"
+    response.headers["X-Latency-Ms"] = f"{float(latency_ms):.2f}"
+    response.headers["X-Cost-USD"] = f"{float(cost_usd):.8f}"
 
 @app.post("/v1/chat")
 
-async def chat_endpoint(request: ChatRequest, request_http: Request):
+async def chat_endpoint(request: ChatRequest, request_http: Request, response: Response):
 
     """
 
@@ -2034,6 +2329,8 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
     """
 
     start_time = time.perf_counter()
+
+    request_id = f"req_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
     session_id = request.session_id or str(uuid.uuid4())
 
@@ -2078,12 +2375,29 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
     user_name = user["name"] if user else None
     user_email = user["email"] if user else None
 
+    existing_session = await asyncio.to_thread(db_get_session_owner, session_id)
+    if existing_session and existing_session["user_id"] != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: chat session belongs to another user.",
+        )
+
     # -----------------------------------------------------------------------
-    # Step 2 in Pipeline: Rate Limit (Redis Token Bucket per key)
+    # Step 2 in Pipeline: Rate Limit (Redis Token Bucket, one bucket per caller)
+    # API key -> key:<id>; logged-in user -> user:<id>; guest -> ip:<client ip>.
+    # Anonymous callers must never share a bucket, or one visitor can starve all.
     # -----------------------------------------------------------------------
+    client_ip = get_client_ip(request_http)
+    if raw_key:
+        rate_bucket = f"key:{key_info['id']}"
+    elif user:
+        rate_bucket = f"user:{user['id']}"
+    else:
+        rate_bucket = f"ip:{client_ip}"
+
     await TRAFFIC_BROADCASTER.broadcast("redis_check", {"key_id": key_info["id"], "quota": key_info.get("quota", 60)})
     allowed, retry_after, remaining = await RATE_LIMITER.check_rate_limit(
-        key_id=key_info["id"],
+        key_id=rate_bucket,
         quota_rpm=key_info.get("quota", 60),
     )
     if not allowed:
@@ -2135,10 +2449,10 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
 
     # Input Guardrails Scan: Prompt Injection (LLM01), SSRF (LLM06), Secrets/PII (LLM02), Payload Size (LLM10)
     raw_content_len = int(request_http.headers.get("content-length") or 0)
-    client_ip = request_http.client.host if request_http.client else "127.0.0.1"
     try:
         guard_res = GUARDRAILS.inspect_input(messages_payload, raw_body_len=raw_content_len)
         messages_payload = guard_res["sanitized_messages"]
+        input_hits = guard_res.get("hits", [])
     except HTTPException as h_err:
         await AUDIT_LOGGER.log_event(
             key_id=str(key_info["id"]),
@@ -2168,7 +2482,17 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
     # -----------------------------------------------------------------------
     # Step 3b: Exact-Match Response Cache Check (Redis with TTL)
     # -----------------------------------------------------------------------
-    cache_key = build_cache_key(alias=target, model=target, messages=messages_payload, temperature=temperature)
+    effective_max_tokens = request.max_tokens or 1000
+    # Scope the key per caller (API key / user / guest IP) and include
+    # max_tokens, so no caller can read a response generated for someone else.
+    cache_key = build_cache_key(
+        scope=rate_bucket,
+        alias=target,
+        model=target,
+        messages=messages_payload,
+        temperature=temperature,
+        max_tokens=effective_max_tokens,
+    )
     cached_result = await RESPONSE_CACHE.get(cache_key)
     if cached_result:
         cached_resp = dict(cached_result)
@@ -2176,7 +2500,50 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
         cached_resp["latency_ms"] = 2.0
         cached_resp["latency"] = 2.0
         cached_resp["queue_wait_ms"] = 0.0
+        cached_resp["coalesced"] = False
+        # The cached payload was written under the original caller's session.
+        # Always hand back the caller's own session id and persist the hit there.
+        cached_resp["session_id"] = session_id
         saved_cost = cached_resp.get("cost_usd", 0.000010)
+        cached_total_tokens = (cached_resp.get("token_usage") or {}).get("total_tokens", 0)
+        try:
+            first_user_msg = request.messages[0].content if request.messages else "New Conversation"
+            title = first_user_msg[:32] + ("..." if len(first_user_msg) > 32 else "")
+
+            def _persist_cached_hit():
+                db_create_session(
+                    session_id=session_id,
+                    title=title,
+                    model=f"{cached_resp.get('provider')} ({cached_resp.get('model')})",
+                    user_id=user_id,
+                    user_name=user_name,
+                    user_email=user_email,
+                )
+                db_save_message(session_id, "user", request.messages[-1].content)
+                db_save_message(
+                    session_id,
+                    "assistant",
+                    cached_resp.get("text", ""),
+                    latency_ms=2.0,
+                    total_tokens=cached_total_tokens,
+                )
+
+            await asyncio.to_thread(_persist_cached_hit)
+            db_save_request_log(
+                session_id=session_id,
+                target=target,
+                provider=cached_resp.get("provider", "cache"),
+                model=cached_resp.get("model", ""),
+                status_code=200,
+                fallback_used=False,
+                attempts=[],
+                latency_ms=2.0,
+                total_tokens=cached_total_tokens,
+                queue_wait_ms=0.0,
+            )
+        except Exception as db_err:
+            logger.warning(f"Cache-hit session persistence failed: {db_err}")
+
         await TRAFFIC_BROADCASTER.broadcast("cache_hit", {
             "key_id": key_info["id"],
             "target": target,
@@ -2185,9 +2552,19 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
         })
         logger.info(
             f"target={target} CACHE_HIT provider={cached_resp.get('provider')} "
-            f"tokens={cached_resp.get('token_usage', {}).get('total_tokens', 0)} "
+            f"tokens={cached_total_tokens} "
             f"saved_cost=${saved_cost:.6f} status=200"
         )
+        _set_public_response_headers(
+            response,
+            request_id=request_id,
+            provider=cached_resp.get("provider", "cache"),
+            model=cached_resp.get("model", ""),
+            fallback_used=False,
+            latency_ms=2.0,
+            cost_usd=0.0,
+        )
+
         return cached_resp
     else:
         await TRAFFIC_BROADCASTER.broadcast("cache_miss", {
@@ -2204,7 +2581,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
             target=target,
             messages=messages_payload,
             temperature=temperature,
-            max_tokens=request.max_tokens or 1000,
+            max_tokens=effective_max_tokens,
             max_retries_per_provider=2,
             total_time_budget=30.0,
         )
@@ -2262,13 +2639,21 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
     # Output Guardrail: Scan for leaked keys, secrets, PII (OWASP LLM02 / LLM05)
     text, output_hits = GUARDRAILS.inspect_output(text)
 
-    # Audit Logging: Non-leaking security event log
+    # Audit Logging: Non-leaking security event log. Input PII flags are recorded
+    # here too; the message body was only flagged, never rewritten.
+    audit_hits = input_hits + output_hits
+    if not audit_hits:
+        audit_outcome = "allowed"
+    elif all(h.get("action") == "flagged" for h in audit_hits):
+        audit_outcome = "flagged"
+    else:
+        audit_outcome = "redacted"
     await AUDIT_LOGGER.log_event(
         key_id=str(key_info["id"]),
         key_name=key_info["name"],
         endpoint="/v1/chat",
-        outcome="allowed" if not output_hits else "redacted",
-        hits=output_hits,
+        outcome=audit_outcome,
+        hits=audit_hits,
         summary=f"Completion for target {target} ({provider})",
         ip_address=client_ip,
     )
@@ -2406,7 +2791,17 @@ async def chat_endpoint(request: ChatRequest, request_http: Request):
 
     except Exception as db_err:
 
-        print("Database persistence notice:", db_err)
+        logger.warning("Database persistence notice: %s", db_err)
+
+    _set_public_response_headers(
+        response,
+        request_id=request_id,
+        provider=provider,
+        model=model,
+        fallback_used=fallback_used,
+        latency_ms=latency_ms,
+        cost_usd=cost_usd,
+    )
 
     # Standard response: text, finish_reason, token usage, latency plus provider, model, alias, fallback_used, attempts
 
@@ -2576,9 +2971,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
   </script>
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/static/vendor/tailwindcss-3.4.16.js" integrity="sha384-mS5Uq7sE90lgbBDN8xgf34ibEgbZo4gB3tfLY40ZRle+M188BQw8onzNHg6GUZaA" crossorigin="anonymous"></script>
 
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/static/vendor/marked-12.0.2.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+
+  <script src="/static/vendor/dompurify-3.1.6.min.js" integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a" crossorigin="anonymous"></script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
 
@@ -5265,6 +5662,34 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       <div class="space-y-6 pb-12">
 
+        <!-- Dashboard Admin Access Card -->
+
+        <div class="glass-panel rounded-2xl p-6 border border-white/10 space-y-3">
+
+          <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+
+            <span class="w-2 h-2 rounded-full bg-amber-400"></span>
+
+            <span>Dashboard Admin Access</span>
+
+          </h3>
+
+          <p class="text-xs text-gray-400">Reliability, logs and DLQ panels require your <code>GATEWAY_ADMIN_TOKEN</code>. It is kept in this browser tab only (sessionStorage) and sent as a request header.</p>
+
+          <div class="flex flex-col sm:flex-row gap-2">
+
+            <input id="gwAdminTokenInput" type="password" autocomplete="off" placeholder="GATEWAY_ADMIN_TOKEN" class="flex-1 bg-[#111827] border border-white/10 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-cyan-500/50">
+
+            <button type="button" onclick="saveAdminToken()" class="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-gray-950 font-bold rounded-lg text-xs transition">Save Token</button>
+
+            <button type="button" onclick="clearAdminToken()" class="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 font-semibold rounded-lg text-xs transition">Clear</button>
+
+          </div>
+
+          <p id="gwAdminTokenStatus" class="text-[11px] text-gray-500">No admin token set for this tab.</p>
+
+        </div>
+
         <!-- Model Configuration Card -->
 
         <div class="glass-panel rounded-2xl p-6 border border-white/10 space-y-4">
@@ -5643,6 +6068,16 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         </div>
 
+        <div class="glass-panel p-4 rounded-2xl border border-white/10">
+
+          <div class="text-[11px] font-medium text-gray-400 uppercase tracking-wider mb-1">Latency Percentiles (1h)</div>
+
+          <div id="statLatencyPercentiles" class="text-base font-bold text-cyan-300 font-mono">p50 — · p95 — · p99 —</div>
+
+          <div id="statPercentileSample" class="text-[10px] text-gray-500 mt-1">0 samples in window</div>
+
+        </div>
+
       </div>
 
       <!-- Detailed Breakdown Grid -->
@@ -5975,6 +6410,44 @@ HTML_CONTENT = """<!DOCTYPE html>
             <span id="vizCostValue" class="font-bold text-white tracking-wide">0.000000</span>
             <span class="text-[9.5px] text-emerald-400 font-sans uppercase">USD</span>
           </div>
+
+        </div>
+
+        <!-- Chaos Control Bar (admin token required; Redis controls need GATEWAY_ALLOW_CHAOS=1) -->
+
+        <div id="vizChaosBar" class="absolute top-[68px] left-6 z-20 flex items-center gap-1.5 bg-[#141923]/90 border border-rose-500/20 rounded-2xl p-1.5 px-2.5 shadow-2xl backdrop-blur-md max-w-[calc(100vw-220px)] overflow-x-auto text-[11px]">
+
+          <span class="text-[9px] font-bold text-rose-400 uppercase tracking-wider px-1">Chaos</span>
+
+          <select id="chaosProviderSelect" class="bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer font-medium" title="Provider to disrupt">
+
+            <option value="mock" selected>Mock A</option>
+
+            <option value="mock2">Mock B</option>
+
+            <option value="groq">Groq</option>
+
+            <option value="openrouter">OpenRouter</option>
+
+            <option value="gemini">Gemini</option>
+
+          </select>
+
+          <button id="chaosKillBtn" type="button" onclick="chaosToggleProvider()" class="px-2 py-1 rounded-lg bg-rose-900/70 hover:bg-rose-900 border border-rose-500/40 text-rose-200 font-bold transition cursor-pointer" title="Toggle a 503 outage on the selected provider">Kill Provider</button>
+
+          <input id="chaosLatencyInput" type="number" min="0" max="20000" step="100" value="1500" title="Latency in milliseconds" class="w-14 text-center bg-transparent text-amber-300 font-bold border-b border-amber-500/50 focus:outline-none" />
+
+          <button type="button" onclick="chaosInjectLatency()" class="px-2 py-1 rounded-lg bg-amber-950/70 hover:bg-amber-900 border border-amber-500/40 text-amber-200 font-bold transition cursor-pointer" title="Inject latency on the selected mock provider">Inject Latency</button>
+
+          <button type="button" onclick="chaosResetLatency()" class="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 font-bold transition cursor-pointer" title="Clear injected latency">Reset</button>
+
+          <div class="h-3.5 w-px bg-white/10"></div>
+
+          <button type="button" onclick="chaosRedis('down')" class="px-2 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 border border-rose-500/30 text-rose-300 font-bold transition cursor-pointer" title="Stop the local Redis container (requires GATEWAY_ALLOW_CHAOS=1)">Redis Down</button>
+
+          <button type="button" onclick="chaosRedis('up')" class="px-2 py-1 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 font-bold transition cursor-pointer" title="Start the local Redis container">Redis Up</button>
+
+          <span id="chaosStatus" class="text-gray-400 font-mono text-[10px] max-w-[240px] truncate"></span>
 
         </div>
 
@@ -7850,6 +8323,60 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     let isSidebarOpen = true;
 
+    // Admin token for reliability/logs/DLQ panels. Kept in this tab only.
+    let __gwAdminToken = '';
+    try { __gwAdminToken = sessionStorage.getItem('gw_admin_token') || ''; } catch (e) {}
+
+    function updateAdminTokenStatus() {
+      const el = document.getElementById('gwAdminTokenStatus');
+      if (el) {
+        el.innerText = __gwAdminToken
+          ? 'Admin token saved for this tab. Reliability, logs and DLQ panels are unlocked.'
+          : 'No admin token set for this tab.';
+      }
+    }
+
+    function saveAdminToken() {
+      const input = document.getElementById('gwAdminTokenInput');
+      __gwAdminToken = (input && input.value ? input.value : '').trim();
+      try {
+        if (__gwAdminToken) sessionStorage.setItem('gw_admin_token', __gwAdminToken);
+        else sessionStorage.removeItem('gw_admin_token');
+      } catch (e) {}
+      updateAdminTokenStatus();
+      if (typeof trafficEventSource !== 'undefined' && trafficEventSource) {
+        try { trafficEventSource.close(); } catch (e) {}
+        trafficEventSource = null;
+      }
+      if (typeof initTrafficStream === 'function') initTrafficStream();
+      if (typeof refreshVisualizeData === 'function') refreshVisualizeData();
+    }
+
+    function clearAdminToken() {
+      const input = document.getElementById('gwAdminTokenInput');
+      if (input) input.value = '';
+      __gwAdminToken = '';
+      try { sessionStorage.removeItem('gw_admin_token'); } catch (e) {}
+      updateAdminTokenStatus();
+    }
+
+    (function installAdminFetch() {
+      const originalFetch = window.fetch.bind(window);
+      const adminPaths = /^\/(api\/reliability|api\/logs|api\/audit-logs|api\/gateway-keys|v1\/dlq|api\/auth\/mailer-status)/;
+      window.fetch = function (input, init) {
+        init = init || {};
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (__gwAdminToken && adminPaths.test(url)) {
+          const headers = new Headers(init.headers || {});
+          headers.set('X-Admin-Token', __gwAdminToken);
+          init.headers = headers;
+        }
+        return originalFetch(input, init);
+      };
+    })();
+
+    updateAdminTokenStatus();
+
     // Compact Provider SVG Logos (w-3.5 h-3.5) - Crisp Groq 'G' icon that is clean and never mistaken for a number 9
 
     const PROVIDER_LOGOS = {
@@ -8484,6 +9011,24 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         const avgLat = data.avg_latency_ms || 0;
 
+        const lp = (data.latency_percentiles && data.latency_percentiles.overall) || null;
+
+        const elPct = document.getElementById('statLatencyPercentiles');
+
+        if (elPct && lp) {
+
+          elPct.innerText = `p50 ${lp.p50}ms · p95 ${lp.p95}ms · p99 ${lp.p99}ms`;
+
+        }
+
+        const elPctSample = document.getElementById('statPercentileSample');
+
+        if (elPctSample && data.latency_percentiles) {
+
+          elPctSample.innerText = `${data.latency_percentiles.sample_size || 0} samples in last ${Math.round((data.latency_percentiles.window_seconds || 3600) / 60)}m`;
+
+        }
+
         const tokens = data.total_tokens || 0;
 
         const fallbacks = data.fallback_count || 0;
@@ -9027,6 +9572,54 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     }
 
+    // EventSource cannot send headers; this adapter speaks SSE over fetch so the
+    // admin token never lands in a URL or server access log.
+    function createAdminEventSource(url, token) {
+      const listeners = {};
+      const controller = new AbortController();
+      const source = {
+        readyState: 0,
+        onopen: null,
+        onerror: null,
+        addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+        close() { controller.abort(); source.readyState = 2; }
+      };
+      (async () => {
+        try {
+          const res = await fetch(url, { headers: { 'X-Admin-Token': token }, signal: controller.signal });
+          if (!res.ok || !res.body) throw new Error('SSE HTTP ' + res.status);
+          source.readyState = 1;
+          if (source.onopen) source.onopen();
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buf.indexOf('\\n\\n')) >= 0) {
+              const chunk = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              let event = 'message';
+              let data = '';
+              chunk.split('\\n').forEach((line) => {
+                if (line.startsWith('event:')) event = line.slice(6).trim();
+                else if (line.startsWith('data:')) data += line.slice(5).trim();
+              });
+              (listeners[event] || []).forEach((fn) => fn({ data }));
+            }
+          }
+        } catch (e) {
+          if (e.name !== 'AbortError') {
+            source.readyState = 2;
+            if (source.onerror) source.onerror(e);
+          }
+        }
+      })();
+      return source;
+    }
+
     function initTrafficStream() {
 
       if (trafficEventSource && trafficEventSource.readyState !== EventSource.CLOSED) {
@@ -9041,7 +9634,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       try {
 
-        trafficEventSource = new EventSource('/api/reliability/traffic-stream');
+        trafficEventSource = __gwAdminToken
+
+          ? createAdminEventSource('/api/reliability/traffic-stream', __gwAdminToken)
+
+          : new EventSource('/api/reliability/traffic-stream');
 
         trafficEventSource.onopen = () => {
 
@@ -9268,7 +9865,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             flashNodeStatus('studioNodeIdempotency', 'blue');
             logVisualizerEvent(
               `<span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-violet-950 text-violet-300 border border-violet-500">IDEMPOTENCY</span>`,
-              `Deduplicated job <span class="text-cyan-300 font-mono">${data.job_id}</span> via key '${data.idempotency_key}'`
+              `Deduplicated job <span class="text-cyan-300 font-mono">${escapeHtml(data.job_id)}</span> via key '${escapeHtml(data.idempotency_key)}'`
             );
           } catch (err) {}
         });
@@ -9370,13 +9967,26 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       row.className = 'flex items-center gap-2 py-0.5 border-b border-white/5 last:border-0';
 
+      // Feed fragments are built by many call sites and can include provider
+      // names, job ids and client-supplied idempotency keys. Sanitize the
+      // assembled markup; allow only the presentation tags these callers use.
+      const safeBadge = window.DOMPurify
+        ? window.DOMPurify.sanitize(String(badgeHtml || ''), { ALLOWED_TAGS: ['span'], ALLOWED_ATTR: ['class'] })
+        : escapeHtml(badgeHtml);
+      const safeText = window.DOMPurify
+        ? window.DOMPurify.sanitize(String(textHtml || ''), {
+            ALLOWED_TAGS: ['span', 'b', 'i', 'em', 'strong', 'code', 'br', 'div', 'small'],
+            ALLOWED_ATTR: ['class'],
+          })
+        : escapeHtml(textHtml);
+
       row.innerHTML = `
 
         <span class="text-gray-500 text-[10px] shrink-0 font-mono">${timeStr}</span>
 
-        ${badgeHtml}
+        ${safeBadge}
 
-        <span class="text-gray-300 truncate">${textHtml}</span>
+        <span class="text-gray-300 truncate">${safeText}</span>
 
       `;
 
@@ -10907,6 +11517,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 
               </div>
 
+              <div class="p-2 rounded-lg bg-white/5 text-center">
+
+                <div class="text-[9px] text-gray-400 uppercase">p50 · p95 · p99 (1h)</div>
+
+                <div id="inspectorPercentiles" class="text-[11px] font-bold text-cyan-300 font-mono mt-0.5">—</div>
+
+              </div>
+
             </div>
 
             <!-- Fault Injection Demo (Two-way Break <-> Unbreak Toggle) -->
@@ -11911,6 +12529,16 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             }
 
+            const pctEl = document.getElementById('inspectorPercentiles');
+
+            if (pctEl && node.percentiles) {
+
+              pctEl.innerText = node.percentiles.count
+                ? `p50 ${node.percentiles.p50}ms · p95 ${node.percentiles.p95}ms · p99 ${node.percentiles.p99}ms`
+                : 'no samples yet';
+
+            }
+
             const faultBtn = document.getElementById('inspectorFaultToggleBtn');
 
             if (faultBtn && node.failure_injection) {
@@ -12087,8 +12715,80 @@ HTML_CONTENT = """<!DOCTYPE html>
         );
 
         await refreshVisualizeData();
+        return data;
       } catch (err) {
         console.error('Failed to toggle failure injection:', err);
+      }
+    }
+
+    function chaosSetStatus(text, isError) {
+      const el = document.getElementById('chaosStatus');
+      if (!el) return;
+      el.innerText = text;
+      el.className = isError
+        ? 'text-rose-300 font-mono text-[10px] max-w-[240px] truncate'
+        : 'text-emerald-300 font-mono text-[10px] max-w-[240px] truncate';
+    }
+
+    async function chaosToggleProvider() {
+      const provider = document.getElementById('chaosProviderSelect').value;
+      chaosSetStatus(`toggling ${provider}...`, false);
+      try {
+        const data = await toggleFailureInjection(provider);
+        if (!data) throw new Error('no response');
+        chaosSetStatus(`${provider}: ${data.enabled ? '503 outage injected' : 'healthy'}`, false);
+      } catch (err) {
+        chaosSetStatus(`kill failed: ${err.message}`, true);
+      }
+    }
+
+    async function chaosSetLatency(ms) {
+      const provider = document.getElementById('chaosProviderSelect').value;
+      try {
+        const res = await fetch('/api/reliability/inject-latency', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, latency_ms: ms }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        chaosSetStatus(`${provider}: ${data.latency_ms} ms injected`, false);
+        logVisualizerEvent(
+          `<span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-500">LATENCY</span>`,
+          `<span class="capitalize font-semibold text-amber-300">${provider}</span> latency set to <strong>${data.latency_ms} ms</strong>`
+        );
+        await refreshVisualizeData();
+      } catch (err) {
+        chaosSetStatus(`latency failed: ${err.message}`, true);
+      }
+    }
+
+    function chaosInjectLatency() {
+      const value = parseInt(document.getElementById('chaosLatencyInput').value || '0', 10);
+      return chaosSetLatency(Number.isFinite(value) && value > 0 ? value : 1500);
+    }
+
+    function chaosResetLatency() {
+      return chaosSetLatency(0);
+    }
+
+    async function chaosRedis(action) {
+      chaosSetStatus(`redis ${action}...`, false);
+      try {
+        const res = await fetch('/api/reliability/redis', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        chaosSetStatus(`redis ${data.action}: ok`, false);
+        logVisualizerEvent(
+          `<span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-rose-950 text-rose-300 border border-rose-500">REDIS ${data.action.toUpperCase()}</span>`,
+          `Redis container <strong>${data.container}</strong> ${data.action === 'down' ? 'stopped' : 'started'}`
+        );
+      } catch (err) {
+        chaosSetStatus(`redis ${action} failed: ${err.message}`, true);
       }
     }
 
@@ -12590,9 +13290,9 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                 <span class="px-2 py-0.5 rounded text-[9.5px] font-bold border font-mono shrink-0 ${badgeClass}">${badgeText}</span>
 
-                <span class="text-cyan-300 font-medium shrink-0 font-mono text-[11px]">"${r.prompt}"</span>
+                <span class="text-cyan-300 font-medium shrink-0 font-mono text-[11px]">"${escapeHtml(r.prompt)}"</span>
 
-                <span class="text-gray-300 text-[11px] truncate italic">→ "${r.text || r.snippet || ''}"</span>
+                <span class="text-gray-300 text-[11px] truncate italic">→ "${escapeHtml(r.text || r.snippet || '')}"</span>
 
               </div>
 
@@ -12600,7 +13300,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                 ${costBadge}
 
-                <span class="text-gray-400 capitalize w-16 text-center">${r.provider || ''}</span>
+                <span class="text-gray-400 capitalize w-16 text-center">${escapeHtml(r.provider || '')}</span>
 
                 <span class="text-indigo-400 font-semibold w-12 text-center" title="Queue Wait Time">Q: ${qWait}</span>
 
@@ -13510,9 +14210,56 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       const div = document.createElement('div');
 
-      div.textContent = str || '';
+      div.textContent = str == null ? '' : String(str);
 
       return div.innerHTML;
+
+    }
+
+    // escapeHtml does not encode quotes, which is fine in text nodes but not
+    // inside attribute values. Use this for title="...", src="..." etc.
+    function escapeAttr(str) {
+
+      return String(str == null ? '' : str)
+
+        .replace(/&/g, '&amp;')
+
+        .replace(/</g, '&lt;')
+
+        .replace(/>/g, '&gt;')
+
+        .replace(/"/g, '&quot;')
+
+        .replace(/'/g, '&#39;');
+
+    }
+
+    // Every markdown/LLM string must go through here before innerHTML.
+    // DOMPurify strips <script>, event handlers and javascript: URLs; if the
+    // CDN is unavailable we fall back to plain escaped text rather than raw HTML.
+    function renderMarkdown(content) {
+
+      const text = content == null ? '' : String(content);
+
+      if (!window.marked) return escapeHtml(text).replace(/\\n/g, '<br>');
+
+      const rawHtml = window.marked.parse(text);
+
+      if (window.DOMPurify) {
+
+        return window.DOMPurify.sanitize(rawHtml, {
+
+          USE_PROFILES: { html: true },
+
+          FORBID_TAGS: ['style', 'form', 'input', 'button'],
+
+          FORBID_ATTR: ['style'],
+
+        });
+
+      }
+
+      return escapeHtml(text).replace(/\\n/g, '<br>');
 
     }
 
@@ -13888,9 +14635,9 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         const avatarMarkup = userAvatar
 
-          ? `<img src="${userAvatar}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';" class="w-6 h-6 rounded-full object-cover shrink-0"><div style="display:none;background-color:${userBgColor};" class="w-6 h-6 rounded-full border border-cyan-500/30 items-center justify-center text-[10px] font-bold text-cyan-300 shrink-0">${userInitials}</div>`
+          ? `<img src="${escapeAttr(userAvatar)}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';" class="w-6 h-6 rounded-full object-cover shrink-0"><div style="display:none;background-color:${escapeAttr(userBgColor)};" class="w-6 h-6 rounded-full border border-cyan-500/30 items-center justify-center text-[10px] font-bold text-cyan-300 shrink-0">${userInitials}</div>`
 
-          : `<div style="background-color:${userBgColor};" class="w-6 h-6 rounded-full border border-cyan-500/30 flex items-center justify-center text-[10px] font-bold text-cyan-300 shrink-0">${userInitials}</div>`;
+          : `<div style="background-color:${escapeAttr(userBgColor)};" class="w-6 h-6 rounded-full border border-cyan-500/30 flex items-center justify-center text-[10px] font-bold text-cyan-300 shrink-0">${userInitials}</div>`;
 
         html += `
 
@@ -13920,7 +14667,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
               <div id="table-title-view-${s.id}" class="flex items-center justify-between">
 
-                <span onclick="openChatSession('${s.id}')" class="text-xs font-bold text-white hover:text-cyan-300 transition cursor-pointer truncate max-w-sm sm:max-w-md block" title="${escapeHtml(s.title || 'Untitled Chat')}">
+                <span onclick="openChatSession('${escapeAttr(s.id)}')" class="text-xs font-bold text-white hover:text-cyan-300 transition cursor-pointer truncate max-w-sm sm:max-w-md block" title="${escapeAttr(s.title || 'Untitled Chat')}">
 
                   ${escapeHtml(s.title || 'Untitled Chat')}
 
@@ -14346,7 +15093,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         if (currentUser && currentUser.picture) {
 
-          avatar = `<div class="w-7 h-7 rounded-full overflow-hidden shrink-0 mt-0.5 border border-cyan-400/40 shadow-sm"><img src="${currentUser.picture}" referrerpolicy="no-referrer" class="w-full h-full object-cover" alt="User"></div>`;
+          avatar = `<div class="w-7 h-7 rounded-full overflow-hidden shrink-0 mt-0.5 border border-cyan-400/40 shadow-sm"><img src="${escapeAttr(currentUser.picture)}" referrerpolicy="no-referrer" class="w-full h-full object-cover" alt="User"></div>`;
 
         } else {
 
@@ -14358,7 +15105,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
           const bg = (currentUser && currentUser.bg_color) ? currentUser.bg_color : '#0284c7';
 
-          avatar = `<div class="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold text-white shrink-0 mt-0.5 shadow-sm border border-cyan-400/30" style="background-color: ${bg};">${initial}</div>`;
+          avatar = `<div class="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold text-white shrink-0 mt-0.5 shadow-sm border border-cyan-400/30" style="background-color: ${escapeAttr(bg)};">${escapeHtml(initial)}</div>`;
 
         }
 
@@ -14376,7 +15123,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
           <div class="user-message-bubble rounded-2xl py-2 px-3.5 border border-cyan-500/30 text-xs leading-relaxed max-w-full font-semibold shadow-sm">
 
-            <div class="user-message-text font-semibold text-xs leading-relaxed [&>p]:m-0 [&>p]:font-semibold">${marked.parse(content)}</div>
+            <div class="user-message-text font-semibold text-xs leading-relaxed [&>p]:m-0 [&>p]:font-semibold">${renderMarkdown(content)}</div>
 
           </div>
 
@@ -14446,7 +15193,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                           [&>code]:font-mono [&>code]:text-xs [&>code]:bg-black/20 dark:[&>code]:bg-white/10 [&>code]:px-1.5 [&>code]:py-0.5 [&>code]:rounded [&>code]:text-cyan-600 dark:[&>code]:text-cyan-300">
 
-                ${marked.parse(content)}
+                ${renderMarkdown(content)}
 
               </div>
 
@@ -16817,7 +17564,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       toast.className = `pointer-events-auto px-4 py-2.5 rounded-xl border ${bgBorder} text-xs font-semibold shadow-2xl backdrop-blur-xl transition-all duration-300 transform translate-y-2 opacity-0 flex items-center gap-2`;
 
-      toast.innerHTML = `<span>${message}</span>`;
+      // Attachment names are attacker-controlled; never parse toast text as HTML.
+      toast.textContent = String(message == null ? '' : message);
 
       container.appendChild(toast);
 
@@ -17025,6 +17773,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       const code = urlParams.get('code');
 
+      const oauthState = urlParams.get('state') || '';
+
       const error = urlParams.get('error');
 
       if (error) {
@@ -17049,7 +17799,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
           headers: { 'Content-Type': 'application/json' },
 
-          body: JSON.stringify({ code })
+          body: JSON.stringify({ code, state: oauthState })
 
         });
 
@@ -18737,4 +19487,6 @@ if __name__ == "__main__":
 
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # proxy_headers must stay off: uvicorn would otherwise rewrite request.client
+    # from X-Forwarded-For before get_client_ip can apply TRUSTED_PROXY_COUNT.
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, proxy_headers=False)

@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.security import ADMIN_TOKEN
 from app.reliability import (
     CIRCUIT_BREAKERS,
     INJECTED_FAILURES,
@@ -220,7 +221,7 @@ async def test_traffic_event_broadcasting():
 def test_provider_nodes_endpoint():
     """Ensure /api/reliability/provider-nodes returns telemetry without full keys."""
     client = TestClient(app)
-    resp = client.get("/api/reliability/provider-nodes")
+    resp = client.get("/api/reliability/provider-nodes", headers={"X-Admin-Token": ADMIN_TOKEN})
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)

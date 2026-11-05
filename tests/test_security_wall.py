@@ -68,15 +68,15 @@ def test_create_and_validate_gateway_key():
 
 
 # ---------------------------------------------------------------------------
-# 2. Pipeline Order & Auth Wall: 401 on Bad/Missing/Revoked Key
+# 2. Pipeline Order & Guest Policy: bad/revoked keys 401, anonymous chat allowed
 # ---------------------------------------------------------------------------
 def test_chat_pipeline_auth_rejections():
     client = TestClient(app)
 
-    # A: Missing key returns 401
-    resp = client.post("/v1/chat", json={"model": "mock", "messages": [{"role": "user", "content": "hi"}]})
-    assert resp.status_code == 401
-    assert "Missing Gateway API key" in resp.json()["detail"]
+    # A: Missing key is the intentional guest path (per-IP quota), not a 401
+    resp = client.post("/v1/chat", json={"model": "mock", "messages": [{"role": "user", "content": "guest policy"}]})
+    assert resp.status_code == 200
+    assert resp.json().get("provider") == "mock"
 
     # B: Bad / Invalid key returns 401
     resp = client.post(

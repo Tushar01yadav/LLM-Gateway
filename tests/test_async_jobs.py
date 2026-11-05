@@ -10,7 +10,7 @@ from app.cost import COST_TRACKER
 from app.jobs import JOB_MANAGER, init_jobs_db
 from app.main import app
 from app.reliability import set_failure_injection, INJECTED_FAILURES
-from app.security import create_gateway_api_key
+from app.security import ADMIN_TOKEN, create_gateway_api_key
 
 init_jobs_db()
 
@@ -22,6 +22,13 @@ async def ensure_clean_jobs():
     yield
     for prov in INJECTED_FAILURES:
         set_failure_injection(prov, enabled=False)
+
+
+def test_job_lease_defaults_are_15s_and_5s():
+    from app.jobs import JOB_HEARTBEAT_SECONDS, JOB_LEASE_SECONDS
+
+    assert JOB_LEASE_SECONDS == 15.0
+    assert JOB_HEARTBEAT_SECONDS == 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +134,7 @@ async def test_dlq_replay_success():
 
     # Replay DLQ job via client endpoint
     client = TestClient(app)
-    resp_replay = client.post(f"/v1/dlq/{job_id}/replay")
+    resp_replay = client.post(f"/v1/dlq/{job_id}/replay", headers={"X-Admin-Token": ADMIN_TOKEN})
     assert resp_replay.status_code == 200
     assert resp_replay.json()["replayed"] is True
 

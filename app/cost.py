@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import sqlite3
 import time
@@ -72,12 +71,25 @@ init_cost_db()
 # ---------------------------------------------------------------------------
 # 1. Exact-Match Response Cache with TTL (Redis + In-Memory Fallback)
 # ---------------------------------------------------------------------------
-def build_cache_key(alias: str, model: str, messages: List[Dict[str, str]], temperature: float) -> str:
-    """Computes deterministic sha256 hash across alias, model, messages, temperature."""
+def build_cache_key(
+    scope: str,
+    alias: str,
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """
+    Deterministic sha256 cache key. `scope` isolates callers ("key:3",
+    "user:7", "ip:203.0.113.9") so one tenant can never read another's cached
+    response. max_tokens is part of the key because it changes the output.
+    """
     normalized = {
+        "scope": (scope or "").strip(),
         "alias": (alias or "").strip().lower(),
         "model": (model or "").strip().lower(),
         "temperature": round(float(temperature or 0.7), 4),
+        "max_tokens": int(max_tokens) if max_tokens is not None else None,
         "messages": [
             {"role": str(m.get("role", "")).strip().lower(), "content": str(m.get("content", "")).strip()}
             for m in (messages or [])
@@ -90,8 +102,8 @@ def build_cache_key(alias: str, model: str, messages: List[Dict[str, str]], temp
 class ResponseCache:
     """Exact-match response cache backed by Redis with local fallback. Never caches errors."""
 
-    def __init__(self, redis_url: str = "redis://127.0.0.1:6379/0", default_ttl: int = 3600):
-        self.redis_url = redis_url
+    def __init__(self, redis_url: Optional[str] = None, default_ttl: int = 3600):
+        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
         self.default_ttl = default_ttl
         self._redis: Optional[aioredis.Redis] = None
         self._local_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
@@ -160,15 +172,21 @@ class ResponseCache:
 class RequestCoalescer:
     """Coalesces simultaneous identical in-flight requests to execute only one provider call."""
 
-    def __init__(self):
+    def __init__(self, follower_timeout: float = 120.0):
         self._in_flight: Dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
+        self.follower_timeout = follower_timeout
 
     async def execute(self, key: str, task_factory: Callable[[], Any]) -> Tuple[Dict[str, Any], bool]:
         """
         Executes task_factory if this is the first in-flight request for key.
         Subsequent callers await the ongoing future.
         Returns (result, was_coalesced: bool).
+
+        Invariants: the shared future is always settled (result, exception or
+        cancelled) before the key is dropped; followers never wait forever,
+        and a cancelled leader releases followers with a retryable 503 instead
+        of hanging them or leaking an unretrieved exception.
         """
         async with self._lock:
             if key in self._in_flight:
@@ -181,8 +199,23 @@ class RequestCoalescer:
                 is_leader = True
 
         if not is_leader:
-            result = await future
-            return result, True
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(future), timeout=self.follower_timeout
+                )
+                return result, True
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Timed out waiting for an identical in-flight request.",
+                )
+            except asyncio.CancelledError:
+                if future.cancelled():
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="The in-flight leader request was cancelled. Please retry.",
+                    )
+                raise
 
         # Leader executes the provider call
         try:
@@ -190,13 +223,21 @@ class RequestCoalescer:
             if not future.done():
                 future.set_result(result)
             return result, False
+        except asyncio.CancelledError:
+            if not future.done():
+                future.cancel()
+            raise
         except Exception as exc:
             if not future.done():
                 future.set_exception(exc)
+                # Consume it so Python does not warn when there is no follower.
+                future.exception()
             raise
         finally:
             async with self._lock:
                 self._in_flight.pop(key, None)
+            if not future.done():
+                future.cancel()
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +273,6 @@ def calculate_request_cost(
     usage = token_usage or {}
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
-    total_tokens = usage.get("total_tokens", 0)
 
     if prompt_tokens is None or prompt_tokens <= 0:
         msg_len = sum(len(m.get("content", "")) for m in (messages or []))
@@ -269,8 +309,8 @@ def record_cost_sync(
 
 
 class CostTracker:
-    def __init__(self, redis_url: str = "redis://127.0.0.1:6379/0"):
-        self.redis_url = redis_url
+    def __init__(self, redis_url: Optional[str] = None):
+        self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
         self._redis: Optional[aioredis.Redis] = None
         self._total_cost_memory: float = 0.0
 

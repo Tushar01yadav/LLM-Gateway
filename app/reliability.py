@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import random
-import sys
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
@@ -222,6 +221,7 @@ CIRCUIT_BREAKERS: Dict[str, CircuitBreaker] = {
     "openrouter": CircuitBreaker("openrouter", failure_threshold=5, cooldown_seconds=60.0),
     "gemini": CircuitBreaker("gemini", failure_threshold=5, cooldown_seconds=60.0),
     "mock": CircuitBreaker("mock", failure_threshold=5, cooldown_seconds=60.0),
+    "mock2": CircuitBreaker("mock2", failure_threshold=5, cooldown_seconds=60.0),
 }
 
 
@@ -465,7 +465,7 @@ def init_concurrency_pools() -> Tuple[GlobalConcurrencyManager, Dict[str, Provid
     prov_pools: Dict[str, ProviderBulkheadPool] = {}
     p_cfgs = c_cfg.get("providers", {})
 
-    for p in ("groq", "openrouter", "gemini", "mock"):
+    for p in sorted(set(p_cfgs.keys()) | {"groq", "openrouter", "gemini", "mock", "mock2"}):
         p_data = p_cfgs.get(p, {})
         prov_pools[p] = ProviderBulkheadPool(
             provider=p,
@@ -489,13 +489,30 @@ def get_concurrency_metrics() -> Dict[str, Any]:
 
 
 def reset_concurrency_pools():
-    """Reset concurrency controllers for testing and administrative resets."""
+    """Reset concurrency controllers for testing and administrative resets.
+
+    Limits are re-read from models.json; the previous hardcoded 10/20/5 silently
+    flattened configured pools (e.g. mock2's 20) after any reset.
+    """
+    try:
+        c_cfg = load_models_config().get("concurrency", {})
+    except Exception:
+        c_cfg = {}
+    p_cfgs = c_cfg.get("providers", {})
+
     GLOBAL_CONCURRENCY.reset()
-    for pool in PROVIDER_POOLS.values():
+    GLOBAL_CONCURRENCY.max_inflight = c_cfg.get("global_max_inflight", 50)
+
+    for p in sorted(set(p_cfgs.keys()) | {"groq", "openrouter", "gemini", "mock", "mock2"}):
+        p_data = p_cfgs.get(p, {})
+        pool = PROVIDER_POOLS.get(p)
+        if pool is None:
+            pool = ProviderBulkheadPool(provider=p)
+            PROVIDER_POOLS[p] = pool
         pool.reset()
-        pool.max_inflight = 10
-        pool.max_queue_size = 20
-        pool.max_queue_wait_sec = 5.0
+        pool.max_inflight = p_data.get("max_inflight", 10)
+        pool.max_queue_size = p_data.get("max_queue_size", 20)
+        pool.max_queue_wait_sec = p_data.get("max_queue_wait_sec", 5.0)
 
 
 def resolve_fallback_chain(target: str) -> List[Dict[str, str]]:
@@ -765,9 +782,65 @@ class GeminiAdapter(BaseAdapter):
 
 
 class MockAdapter(BaseAdapter):
-    """Mock provider with configurable/fixed latency (default 500ms) for deterministic stress tests."""
-    def __init__(self, latency_sec: float = 0.5):
+    """
+    Mock provider with configurable latency for deterministic stress tests.
+
+    Latency precedence: GATEWAY_MOCK_LATENCY_FILE -> GATEWAY_MOCK_LATENCY_MS ->
+    fixed 500ms default. The control file may contain either a single number
+    (applies to every mock provider) or a JSON object keyed by provider name.
+
+    When GATEWAY_MOCK_OVERLOAD=1, latency grows with provider in-flight and
+    calls above GATEWAY_MOCK_OVERLOAD_ERROR_AT fail with 503. This is used by
+    the overload benchmark; it is off by default.
+    """
+    def __init__(self, provider_name: str = "mock", latency_sec: float = 0.5):
+        self.provider_name = provider_name
         self.latency_sec = latency_sec
+
+    def _control_file_latency(self) -> Optional[float]:
+        control_file = os.getenv("GATEWAY_MOCK_LATENCY_FILE", "").strip()
+        if not control_file:
+            return None
+        try:
+            with open(control_file, "r", encoding="utf-8") as fh:
+                raw = fh.read().strip()
+            if not raw:
+                return None
+            if raw.startswith("{"):
+                data = json.loads(raw)
+                value = data.get(self.provider_name)
+                return None if value is None else max(0.0, float(value) / 1000.0)
+            return max(0.0, float(raw) / 1000.0)
+        except Exception:
+            return None
+
+    def _current_latency(self) -> float:
+        injected = INJECTED_LATENCY_MS.get(self.provider_name, 0)
+        if injected:
+            return injected / 1000.0
+        from_file = self._control_file_latency()
+        if from_file is not None:
+            return from_file
+        try:
+            return max(0.0, float(os.getenv("GATEWAY_MOCK_LATENCY_MS", "")) / 1000.0)
+        except (TypeError, ValueError):
+            return self.latency_sec
+
+    def _overload_latency(self) -> Optional[float]:
+        if os.getenv("GATEWAY_MOCK_OVERLOAD", "").strip().lower() not in ("1", "true", "on", "yes"):
+            return None
+        try:
+            base_ms = float(os.getenv("GATEWAY_MOCK_OVERLOAD_BASE_MS", "500"))
+            slope_ms = float(os.getenv("GATEWAY_MOCK_OVERLOAD_SLOPE_MS", "150"))
+            error_at = int(os.getenv("GATEWAY_MOCK_OVERLOAD_ERROR_AT", "12"))
+        except (TypeError, ValueError):
+            return None
+        in_flight = int(NODE_METRICS.get(self.provider_name, {}).get("in_flight", 0))
+        if error_at > 0 and in_flight > error_at:
+            req = httpx.Request("POST", f"https://mock.local/{self.provider_name}")
+            resp = httpx.Response(503, text="Simulated overload", request=req)
+            raise httpx.HTTPStatusError("Simulated overload", request=req, response=resp)
+        return max(0.0, (base_ms + slope_ms * max(0, in_flight - 1)) / 1000.0)
 
     async def generate(
         self,
@@ -777,7 +850,8 @@ class MockAdapter(BaseAdapter):
         max_tokens: int,
         client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
-        await asyncio.sleep(self.latency_sec)
+        overload_latency = self._overload_latency()
+        await asyncio.sleep(self._current_latency() if overload_latency is None else overload_latency)
         return {
             "text": "Mock response for stress testing",
             "finish_reason": "stop",
@@ -793,7 +867,8 @@ ADAPTER_MAP: Dict[str, BaseAdapter] = {
     "groq": GroqAdapter(),
     "openrouter": OpenRouterAdapter(),
     "gemini": GeminiAdapter(),
-    "mock": MockAdapter(),
+    "mock": MockAdapter("mock"),
+    "mock2": MockAdapter("mock2"),
 }
 
 
@@ -878,6 +953,7 @@ NODE_METRICS: Dict[str, Dict[str, int]] = {
     "openrouter": {"served": 0, "failed": 0, "in_flight": 0},
     "gemini": {"served": 0, "failed": 0, "in_flight": 0},
     "mock": {"served": 0, "failed": 0, "in_flight": 0},
+    "mock2": {"served": 0, "failed": 0, "in_flight": 0},
 }
 
 # Failure injection registry for interactive demos
@@ -886,7 +962,20 @@ INJECTED_FAILURES: Dict[str, Dict[str, Any]] = {
     "openrouter": {"enabled": False, "mode": "503"},
     "gemini": {"enabled": False, "mode": "503"},
     "mock": {"enabled": False, "mode": "503"},
+    "mock2": {"enabled": False, "mode": "503"},
 }
+
+# Runtime latency injection for mock providers (visualizer chaos panel).
+INJECTED_LATENCY_MS: Dict[str, int] = {provider: 0 for provider in INJECTED_FAILURES}
+
+
+def set_injected_latency(provider: str, latency_ms: int) -> Dict[str, Any]:
+    """Set a mock provider's latency in milliseconds; 0 clears the injection."""
+    provider = provider.lower()
+    if provider not in INJECTED_LATENCY_MS:
+        raise ValueError(f"Unknown provider: {provider}")
+    INJECTED_LATENCY_MS[provider] = max(0, int(latency_ms))
+    return {"provider": provider, "latency_ms": INJECTED_LATENCY_MS[provider]}
 
 
 def set_failure_injection(provider: str, enabled: bool, mode: str = "503") -> Dict[str, Any]:
@@ -1070,6 +1159,8 @@ def get_provider_nodes_info() -> List[Dict[str, Any]]:
             "key_status": "valid" if has_key else "not_configured",
             "circuit_breaker": cb_status,
             "failure_injection": inj,
+
+            "injected_latency_ms": INJECTED_LATENCY_MS.get(provider, 0),
             "metrics": metrics,
             "concurrency": pool_metrics,
         })
@@ -1128,7 +1219,7 @@ async def run_startup_smoke_test(client: Optional[httpx.AsyncClient] = None) -> 
                 continue
 
             try:
-                res = await adapter.generate(
+                await adapter.generate(
                     messages=[{"role": "user", "content": "ping"}],
                     model=mod,
                     temperature=0.0,
@@ -1192,10 +1283,16 @@ async def execute_reliable_completion(
     overall_start_time = time.perf_counter()
     deadline = overall_start_time + total_time_budget
     req_id = request_id or f"req_{int(time.time()*1000)}_{random.randint(100, 999)}"
+    # Benchmark-only escape hatch: GATEWAY_CONCURRENCY_CONTROL=off disables the
+    # global slot and provider bulkheads so a BEFORE/AFTER load run can measure
+    # their effect. Default on; never disable it in production.
+    control_enabled = os.getenv("GATEWAY_CONCURRENCY_CONTROL", "on").strip().lower() not in (
+        "off", "0", "false", "no", "disabled"
+    )
 
     # 1. Acquire Global Slot
-    global_acquired = await GLOBAL_CONCURRENCY.acquire()
-    if not global_acquired:
+    global_acquired = await GLOBAL_CONCURRENCY.acquire() if control_enabled else True
+    if control_enabled and not global_acquired:
         logger.warning(
             f"[{req_id}] Global gateway concurrency limit reached ({GLOBAL_CONCURRENCY.max_inflight}). Shedding request with 429."
         )
@@ -1294,7 +1391,7 @@ async def execute_reliable_completion(
                     q_wait_ms = 0.0
                     q_reason = "slot_free"
 
-                    if pool:
+                    if pool and control_enabled:
                         slot_acquired, q_wait_ms, q_reason = await pool.acquire(timeout_budget=remaining_budget)
                         total_queue_wait_ms += q_wait_ms
 
@@ -1590,5 +1687,6 @@ async def execute_reliable_completion(
         if router_in_flight_tracked:
             NODE_METRICS["router"]["in_flight"] = max(0, NODE_METRICS["router"]["in_flight"] - 1)
             router_in_flight_tracked = False
-        # ALWAYS release global slot
-        await GLOBAL_CONCURRENCY.release()
+        # ALWAYS release global slot (only if this request actually took one)
+        if global_acquired:
+            await GLOBAL_CONCURRENCY.release()

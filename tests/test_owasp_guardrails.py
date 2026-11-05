@@ -92,7 +92,7 @@ async def test_owasp_llm02_secret_and_key_leakage_redaction(test_keys):
     finally:
         os.environ.pop("TEST_SECRET_KEY", None)
 
-    # 3. Input PII redaction test through API
+    # 3. Hard-secret input passes through redaction without failing the request
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         headers = {"Authorization": f"Bearer {test_keys['main']}"}
@@ -259,13 +259,15 @@ async def test_owasp_llm10_unbounded_consumption_budget(test_keys):
 async def test_owasp_auth_bypass_prevention():
     """
     Access Control & Auth Bypass Prevention
-    Verifies that requests without authentication, with invalid keys, or with revoked keys return 401.
+    Anonymous chat is an intentional product policy (guest quota per IP, commit
+    e74cf56). Invalid, malformed, and revoked keys must still be rejected.
     """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        # 1. Missing Authorization header
-        r1 = await ac.post("/v1/chat", json={"alias": "mock", "messages": [{"role": "user", "content": "test"}]})
-        assert r1.status_code == 401
+        # 1. Missing Authorization header: guest chat is allowed by policy
+        r1 = await ac.post("/v1/chat", json={"alias": "mock", "messages": [{"role": "user", "content": "guest policy check"}]})
+        assert r1.status_code == 200
+        assert r1.json().get("provider") == "mock"
 
         # 2. Invalid Key
         r2 = await ac.post(

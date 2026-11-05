@@ -1,0 +1,325 @@
+{
+  "generated_at": "2026-11-05T05:23:14.657166+00:00",
+  "environment": {
+    "platform": "win32",
+    "python": "3.10.11",
+    "redis_db": 4,
+    "redis_container": "llm-gateway-redis",
+    "workers": 2,
+    "ports": [
+      8051,
+      8052
+    ],
+    "mock_latency_ms_default": 500,
+    "load": {
+      "total_requests": 300,
+      "concurrency": 30,
+      "fault_after_s": 8,
+      "fault_duration_s": 5
+    }
+  },
+  "scenarios": [
+    {
+      "mode": "provider_death",
+      "fault_window_s": 5.31,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 107,
+        "success_rate": 0.9346,
+        "by_class": {
+          "served": 100,
+          "error_5xx": 7
+        },
+        "served_latency_ms": {
+          "count": 100,
+          "p50": 2453.54,
+          "p95": 3824.06,
+          "p99": 4570.74,
+          "max": 4855.72
+        },
+        "all_latency_ms": {
+          "count": 107,
+          "p50": 2498.83,
+          "p95": 4554.81,
+          "p99": 4774.68,
+          "max": 4855.72
+        }
+      },
+      "during_fault": {
+        "requests": 90,
+        "success_rate": 0.1889,
+        "by_class": {
+          "error_5xx": 73,
+          "served": 17
+        },
+        "served_latency_ms": {
+          "count": 17,
+          "p50": 3405.34,
+          "p95": 3894.34,
+          "p99": 3894.34,
+          "max": 3894.34
+        },
+        "all_latency_ms": {
+          "count": 90,
+          "p50": 1542.29,
+          "p95": 3894.34,
+          "p99": 4743.3,
+          "max": 4743.3
+        }
+      },
+      "post_fault": {
+        "requests": 103,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 103
+        },
+        "served_latency_ms": {
+          "count": 103,
+          "p50": 2909.69,
+          "p95": 3617.05,
+          "p99": 3868.99,
+          "max": 4151.24
+        },
+        "all_latency_ms": {
+          "count": 103,
+          "p50": 2909.69,
+          "p95": 3617.05,
+          "p99": 3868.99,
+          "max": 4151.24
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": {
+        "started": 1793856074.7102706,
+        "ended": 1793856075.4700158,
+        "latency_ms": 759.82,
+        "status": 502,
+        "class": "error_5xx"
+      },
+      "scenario": "provider_death",
+      "description": "mock provider returns 503 mid-load",
+      "circuit_breaker_after_run": {
+        "8051": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        },
+        "8052": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        }
+      },
+      "run_seconds": 26.85
+    },
+    {
+      "mode": "provider_latency",
+      "fault_window_s": 5.02,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 132,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 132
+        },
+        "served_latency_ms": {
+          "count": 132,
+          "p50": 2009.72,
+          "p95": 5874.01,
+          "p99": 7082.19,
+          "max": 7777.55
+        },
+        "all_latency_ms": {
+          "count": 132,
+          "p50": 2009.72,
+          "p95": 5874.01,
+          "p99": 7082.19,
+          "max": 7777.55
+        }
+      },
+      "during_fault": {
+        "requests": 17,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 17
+        },
+        "served_latency_ms": {
+          "count": 17,
+          "p50": 5792.59,
+          "p95": 8316.31,
+          "p99": 8316.31,
+          "max": 8316.31
+        },
+        "all_latency_ms": {
+          "count": 17,
+          "p50": 5792.59,
+          "p95": 8316.31,
+          "p99": 8316.31,
+          "max": 8316.31
+        }
+      },
+      "post_fault": {
+        "requests": 151,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 151
+        },
+        "served_latency_ms": {
+          "count": 151,
+          "p50": 1898.65,
+          "p95": 2776.64,
+          "p99": 3280.55,
+          "max": 3621.19
+        },
+        "all_latency_ms": {
+          "count": 151,
+          "p50": 1898.65,
+          "p95": 2776.64,
+          "p99": 3280.55,
+          "max": 3621.19
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "provider_latency",
+      "description": "mock latency raised 500 ms -> 5000 ms mid-load",
+      "circuit_breaker_after_run": {
+        "8051": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        },
+        "8052": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        }
+      },
+      "run_seconds": 25.08
+    },
+    {
+      "mode": "redis_kill",
+      "fault_window_s": 5.99,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 130,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 130
+        },
+        "served_latency_ms": {
+          "count": 130,
+          "p50": 2111.15,
+          "p95": 3251.19,
+          "p99": 3737.05,
+          "max": 3833.13
+        },
+        "all_latency_ms": {
+          "count": 130,
+          "p50": 2111.15,
+          "p95": 3251.19,
+          "p99": 3737.05,
+          "max": 3833.13
+        }
+      },
+      "during_fault": {
+        "requests": 56,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 56
+        },
+        "served_latency_ms": {
+          "count": 56,
+          "p50": 3303.18,
+          "p95": 4156.47,
+          "p99": 4294.5,
+          "max": 4294.5
+        },
+        "all_latency_ms": {
+          "count": 56,
+          "p50": 3303.18,
+          "p95": 4156.47,
+          "p99": 4294.5,
+          "max": 4294.5
+        }
+      },
+      "post_fault": {
+        "requests": 114,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 114
+        },
+        "served_latency_ms": {
+          "count": 114,
+          "p50": 1969.61,
+          "p95": 3017.72,
+          "p99": 3153.46,
+          "max": 3508.49
+        },
+        "all_latency_ms": {
+          "count": 114,
+          "p50": 1969.61,
+          "p95": 3017.72,
+          "p99": 3153.46,
+          "max": 3508.49
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "redis_kill",
+      "description": "llm-gateway-redis container killed (docker kill) and restarted mid-load",
+      "redis_outage": {
+        "kill_returncode": 0,
+        "kill_stderr": "",
+        "ping_failures": 8,
+        "first_ping_fail_s": 9.07,
+        "ping_restored_s": 15.16
+      },
+      "run_seconds": 24.52
+    },
+    {
+      "scenario": "worker_kill",
+      "description": "hard-kill (TerminateProcess) the worker owning a lease while 12 jobs and HTTP load run",
+      "worker_killed_pid": 912,
+      "killed": true,
+      "jobs": {
+        "submitted": 12,
+        "done": 12,
+        "dlq": 0,
+        "attempts": {
+          "job_081aab0469ff": 1,
+          "job_4decaaff9dcc": 1,
+          "job_6f866cfeb71a": 1,
+          "job_afcb5a7e1392": 1,
+          "job_b000b759a078": 1,
+          "job_b0202e279aa3": 1,
+          "job_d1db2e0d05cc": 2,
+          "job_d3edee978b91": 1,
+          "job_db2f042e0e3f": 1,
+          "job_e3e4c94567e5": 1,
+          "job_e4ed61afcdd0": 1,
+          "job_f81782fa277c": 1
+        },
+        "all_terminal": true
+      },
+      "http_load": {
+        "timeout_or_conn_error": 15,
+        "served": 15
+      },
+      "http_load_by_port": {
+        "8051": {
+          "timeout_or_conn_error": 15
+        },
+        "8052": {
+          "served": 15
+        }
+      },
+      "time_to_recover_s": 37.53,
+      "job_cost_rows_delta": 12,
+      "run_seconds": 48.05
+    }
+  ]
+}

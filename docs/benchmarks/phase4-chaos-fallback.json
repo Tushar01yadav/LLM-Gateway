@@ -1,0 +1,815 @@
+{
+  "generated_at": "2026-11-05T06:30:47.195939+00:00",
+  "environment": {
+    "platform": "win32",
+    "python": "3.10.11",
+    "redis_db": 4,
+    "redis_container": "llm-gateway-redis",
+    "workers": 2,
+    "ports": [
+      8051,
+      8052
+    ],
+    "alias": "mock_failover",
+    "real_alias": "fast",
+    "load": {
+      "total_requests": 300,
+      "concurrency": 30,
+      "fault_after_s": 8,
+      "fault_duration_s": 5
+    }
+  },
+  "baseline_without_fallback": [
+    {
+      "mode": "provider_death",
+      "fault_window_s": 5.31,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 107,
+        "success_rate": 0.9346,
+        "by_class": {
+          "served": 100,
+          "error_5xx": 7
+        },
+        "served_latency_ms": {
+          "count": 100,
+          "p50": 2453.54,
+          "p95": 3824.06,
+          "p99": 4570.74,
+          "max": 4855.72
+        },
+        "all_latency_ms": {
+          "count": 107,
+          "p50": 2498.83,
+          "p95": 4554.81,
+          "p99": 4774.68,
+          "max": 4855.72
+        }
+      },
+      "during_fault": {
+        "requests": 90,
+        "success_rate": 0.1889,
+        "by_class": {
+          "error_5xx": 73,
+          "served": 17
+        },
+        "served_latency_ms": {
+          "count": 17,
+          "p50": 3405.34,
+          "p95": 3894.34,
+          "p99": 3894.34,
+          "max": 3894.34
+        },
+        "all_latency_ms": {
+          "count": 90,
+          "p50": 1542.29,
+          "p95": 3894.34,
+          "p99": 4743.3,
+          "max": 4743.3
+        }
+      },
+      "post_fault": {
+        "requests": 103,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 103
+        },
+        "served_latency_ms": {
+          "count": 103,
+          "p50": 2909.69,
+          "p95": 3617.05,
+          "p99": 3868.99,
+          "max": 4151.24
+        },
+        "all_latency_ms": {
+          "count": 103,
+          "p50": 2909.69,
+          "p95": 3617.05,
+          "p99": 3868.99,
+          "max": 4151.24
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": {
+        "started": 1793856074.7102706,
+        "ended": 1793856075.4700158,
+        "latency_ms": 759.82,
+        "status": 502,
+        "class": "error_5xx"
+      },
+      "scenario": "provider_death",
+      "description": "mock provider returns 503 mid-load",
+      "circuit_breaker_after_run": {
+        "8051": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        },
+        "8052": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        }
+      },
+      "run_seconds": 26.85
+    },
+    {
+      "mode": "provider_latency",
+      "fault_window_s": 5.02,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 132,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 132
+        },
+        "served_latency_ms": {
+          "count": 132,
+          "p50": 2009.72,
+          "p95": 5874.01,
+          "p99": 7082.19,
+          "max": 7777.55
+        },
+        "all_latency_ms": {
+          "count": 132,
+          "p50": 2009.72,
+          "p95": 5874.01,
+          "p99": 7082.19,
+          "max": 7777.55
+        }
+      },
+      "during_fault": {
+        "requests": 17,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 17
+        },
+        "served_latency_ms": {
+          "count": 17,
+          "p50": 5792.59,
+          "p95": 8316.31,
+          "p99": 8316.31,
+          "max": 8316.31
+        },
+        "all_latency_ms": {
+          "count": 17,
+          "p50": 5792.59,
+          "p95": 8316.31,
+          "p99": 8316.31,
+          "max": 8316.31
+        }
+      },
+      "post_fault": {
+        "requests": 151,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 151
+        },
+        "served_latency_ms": {
+          "count": 151,
+          "p50": 1898.65,
+          "p95": 2776.64,
+          "p99": 3280.55,
+          "max": 3621.19
+        },
+        "all_latency_ms": {
+          "count": 151,
+          "p50": 1898.65,
+          "p95": 2776.64,
+          "p99": 3280.55,
+          "max": 3621.19
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "provider_latency",
+      "description": "mock latency raised 500 ms -> 5000 ms mid-load",
+      "circuit_breaker_after_run": {
+        "8051": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        },
+        "8052": {
+          "state": "CLOSED",
+          "consecutive_failures": 0,
+          "cooldown_remaining_s": 0.0
+        }
+      },
+      "run_seconds": 25.08
+    },
+    {
+      "mode": "redis_kill",
+      "fault_window_s": 5.99,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 130,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 130
+        },
+        "served_latency_ms": {
+          "count": 130,
+          "p50": 2111.15,
+          "p95": 3251.19,
+          "p99": 3737.05,
+          "max": 3833.13
+        },
+        "all_latency_ms": {
+          "count": 130,
+          "p50": 2111.15,
+          "p95": 3251.19,
+          "p99": 3737.05,
+          "max": 3833.13
+        }
+      },
+      "during_fault": {
+        "requests": 56,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 56
+        },
+        "served_latency_ms": {
+          "count": 56,
+          "p50": 3303.18,
+          "p95": 4156.47,
+          "p99": 4294.5,
+          "max": 4294.5
+        },
+        "all_latency_ms": {
+          "count": 56,
+          "p50": 3303.18,
+          "p95": 4156.47,
+          "p99": 4294.5,
+          "max": 4294.5
+        }
+      },
+      "post_fault": {
+        "requests": 114,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 114
+        },
+        "served_latency_ms": {
+          "count": 114,
+          "p50": 1969.61,
+          "p95": 3017.72,
+          "p99": 3153.46,
+          "max": 3508.49
+        },
+        "all_latency_ms": {
+          "count": 114,
+          "p50": 1969.61,
+          "p95": 3017.72,
+          "p99": 3153.46,
+          "max": 3508.49
+        }
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "redis_kill",
+      "description": "llm-gateway-redis container killed (docker kill) and restarted mid-load",
+      "redis_outage": {
+        "kill_returncode": 0,
+        "kill_stderr": "",
+        "ping_failures": 8,
+        "first_ping_fail_s": 9.07,
+        "ping_restored_s": 15.16
+      },
+      "run_seconds": 24.52
+    },
+    {
+      "scenario": "worker_kill",
+      "description": "hard-kill (TerminateProcess) the worker owning a lease while 12 jobs and HTTP load run",
+      "worker_killed_pid": 912,
+      "killed": true,
+      "jobs": {
+        "submitted": 12,
+        "done": 12,
+        "dlq": 0,
+        "attempts": {
+          "job_081aab0469ff": 1,
+          "job_4decaaff9dcc": 1,
+          "job_6f866cfeb71a": 1,
+          "job_afcb5a7e1392": 1,
+          "job_b000b759a078": 1,
+          "job_b0202e279aa3": 1,
+          "job_d1db2e0d05cc": 2,
+          "job_d3edee978b91": 1,
+          "job_db2f042e0e3f": 1,
+          "job_e3e4c94567e5": 1,
+          "job_e4ed61afcdd0": 1,
+          "job_f81782fa277c": 1
+        },
+        "all_terminal": true
+      },
+      "http_load": {
+        "timeout_or_conn_error": 15,
+        "served": 15
+      },
+      "http_load_by_port": {
+        "8051": {
+          "timeout_or_conn_error": 15
+        },
+        "8052": {
+          "served": 15
+        }
+      },
+      "time_to_recover_s": 37.53,
+      "job_cost_rows_delta": 12,
+      "run_seconds": 48.05
+    }
+  ],
+  "scenarios": [
+    {
+      "mode": "provider_death_fallback",
+      "alias": "mock_failover",
+      "fault_window_s": 5.53,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 88,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 88
+        },
+        "served_by_provider": {
+          "mock": 82,
+          "mock2": 6
+        },
+        "served_primary": 82,
+        "served_fallback": 6,
+        "fallback_share": 0.0682,
+        "served_latency_ms": {
+          "count": 88,
+          "p50": 3039.27,
+          "p95": 5868.04,
+          "p99": 7232.8,
+          "max": 7232.8
+        },
+        "all_latency_ms": {
+          "count": 88,
+          "p50": 3039.27,
+          "p95": 5868.04,
+          "p99": 7232.8,
+          "max": 7232.8
+        },
+        "attempt_outcomes": {
+          "mock:error:server_error_503": 18
+        }
+      },
+      "during_fault": {
+        "requests": 50,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 50
+        },
+        "served_by_provider": {
+          "mock2": 40,
+          "mock": 10
+        },
+        "served_primary": 10,
+        "served_fallback": 40,
+        "fallback_share": 0.8,
+        "served_latency_ms": {
+          "count": 50,
+          "p50": 2020.67,
+          "p95": 7152.46,
+          "p99": 9625.09,
+          "max": 9625.09
+        },
+        "all_latency_ms": {
+          "count": 50,
+          "p50": 2020.67,
+          "p95": 7152.46,
+          "p99": 9625.09,
+          "max": 9625.09
+        },
+        "attempt_outcomes": {
+          "mock:skipped:circuit_breaker_open": 36,
+          "mock:error:server_error_503": 19
+        }
+      },
+      "post_fault": {
+        "requests": 162,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 162
+        },
+        "served_by_provider": {
+          "mock": 162
+        },
+        "served_primary": 162,
+        "served_fallback": 0,
+        "fallback_share": 0.0,
+        "served_latency_ms": {
+          "count": 162,
+          "p50": 2369.48,
+          "p95": 3625.69,
+          "p99": 5010.72,
+          "max": 5831.39
+        },
+        "all_latency_ms": {
+          "count": 162,
+          "p50": 2369.48,
+          "p95": 3625.69,
+          "p99": 5010.72,
+          "max": 5831.39
+        },
+        "attempt_outcomes": {}
+      },
+      "first_fallback": {
+        "provider": "mock2",
+        "latency_ms": 1669.9,
+        "first_served_s_after_fault": 2.68
+      },
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "provider_death_fallback",
+      "description": "primary mock returns 503 mid-load; fallback mock2 stays healthy",
+      "breaker_watch": {
+        "breaker_open_s": 2.24,
+        "breaker_state_when_open": {
+          "state": "OPEN",
+          "consecutive_failures": 8,
+          "cooldown_remaining_s": 59.8
+        }
+      },
+      "breaker_after_run": {
+        "8051": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        },
+        "8052": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        }
+      },
+      "run_seconds": 29.12
+    },
+    {
+      "mode": "provider_latency_fallback",
+      "alias": "mock_failover",
+      "fault_window_s": 5.01,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 65,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 65
+        },
+        "served_by_provider": {
+          "mock": 65
+        },
+        "served_primary": 65,
+        "served_fallback": 0,
+        "fallback_share": 0.0,
+        "served_latency_ms": {
+          "count": 65,
+          "p50": 5183.51,
+          "p95": 9531.0,
+          "p99": 9932.5,
+          "max": 9932.5
+        },
+        "all_latency_ms": {
+          "count": 65,
+          "p50": 5183.51,
+          "p95": 9531.0,
+          "p99": 9932.5,
+          "max": 9932.5
+        },
+        "attempt_outcomes": {}
+      },
+      "during_fault": {
+        "requests": 17,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 17
+        },
+        "served_by_provider": {
+          "mock": 17
+        },
+        "served_primary": 17,
+        "served_fallback": 0,
+        "fallback_share": 0.0,
+        "served_latency_ms": {
+          "count": 17,
+          "p50": 6990.49,
+          "p95": 8203.34,
+          "p99": 8203.34,
+          "max": 8203.34
+        },
+        "all_latency_ms": {
+          "count": 17,
+          "p50": 6990.49,
+          "p95": 8203.34,
+          "p99": 8203.34,
+          "max": 8203.34
+        },
+        "attempt_outcomes": {}
+      },
+      "post_fault": {
+        "requests": 218,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 218
+        },
+        "served_by_provider": {
+          "mock": 218
+        },
+        "served_primary": 218,
+        "served_fallback": 0,
+        "fallback_share": 0.0,
+        "served_latency_ms": {
+          "count": 218,
+          "p50": 3508.7,
+          "p95": 4907.23,
+          "p99": 5623.15,
+          "max": 5857.47
+        },
+        "all_latency_ms": {
+          "count": 218,
+          "p50": 3508.7,
+          "p95": 4907.23,
+          "p99": 5623.15,
+          "max": 5857.47
+        },
+        "attempt_outcomes": {}
+      },
+      "first_fallback": null,
+      "time_to_recover_s": 0,
+      "total_requests": 300,
+      "error_detail_sample": null,
+      "scenario": "provider_latency_fallback",
+      "description": "primary mock latency -> 5000 ms mid-load; fallback mock2 stays at 500 ms",
+      "breaker_watch": {},
+      "breaker_after_run": {
+        "8051": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        },
+        "8052": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        }
+      },
+      "run_seconds": 44.34
+    },
+    {
+      "mode": "provider_latency_severe",
+      "alias": "mock_failover",
+      "fault_window_s": 25.01,
+      "window_basis": "request start time",
+      "pre_fault": {
+        "requests": 53,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 53
+        },
+        "served_by_provider": {
+          "mock": 45,
+          "mock2": 8
+        },
+        "served_primary": 45,
+        "served_fallback": 8,
+        "fallback_share": 0.1509,
+        "served_latency_ms": {
+          "count": 53,
+          "p50": 2793.85,
+          "p95": 17387.48,
+          "p99": 17440.21,
+          "max": 17440.21
+        },
+        "all_latency_ms": {
+          "count": 53,
+          "p50": 2793.85,
+          "p95": 17387.48,
+          "p99": 17440.21,
+          "max": 17440.21
+        },
+        "attempt_outcomes": {
+          "mock:error:unknown_error": 8
+        }
+      },
+      "during_fault": {
+        "requests": 52,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 52
+        },
+        "served_by_provider": {
+          "mock2": 52
+        },
+        "served_primary": 0,
+        "served_fallback": 52,
+        "fallback_share": 1.0,
+        "served_latency_ms": {
+          "count": 52,
+          "p50": 6352.07,
+          "p95": 17814.74,
+          "p99": 18234.51,
+          "max": 18234.51
+        },
+        "all_latency_ms": {
+          "count": 52,
+          "p50": 6352.07,
+          "p95": 17814.74,
+          "p99": 18234.51,
+          "max": 18234.51
+        },
+        "attempt_outcomes": {
+          "mock:saturated:queue_wait_exceeded": 40,
+          "mock:error:unknown_error": 12
+        }
+      },
+      "post_fault": {
+        "requests": 135,
+        "success_rate": 1.0,
+        "by_class": {
+          "served": 135
+        },
+        "served_by_provider": {
+          "mock": 135
+        },
+        "served_primary": 135,
+        "served_fallback": 0,
+        "fallback_share": 0.0,
+        "served_latency_ms": {
+          "count": 135,
+          "p50": 1332.4,
+          "p95": 2525.72,
+          "p99": 3673.31,
+          "max": 3736.9
+        },
+        "all_latency_ms": {
+          "count": 135,
+          "p50": 1332.4,
+          "p95": 2525.72,
+          "p99": 3673.31,
+          "max": 3736.9
+        },
+        "attempt_outcomes": {}
+      },
+      "first_fallback": {
+        "provider": "mock2",
+        "latency_ms": 6788.06,
+        "first_served_s_after_fault": 6.83
+      },
+      "time_to_recover_s": 2,
+      "total_requests": 240,
+      "error_detail_sample": null,
+      "scenario": "provider_latency_severe",
+      "description": "primary mock latency -> 16000 ms mid-load; fallback mock2 stays at 500 ms",
+      "breaker_watch": {},
+      "breaker_after_run": {
+        "8051": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        },
+        "8052": {
+          "mock": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          },
+          "mock2": {
+            "state": "CLOSED",
+            "consecutive_failures": 0,
+            "cooldown_remaining_s": 0.0
+          }
+        }
+      },
+      "run_seconds": 47.21
+    },
+    {
+      "scenario": "real_groq_openrouter",
+      "description": "3 real Groq calls, then 3 calls with Groq injected as 503 so the real OpenRouter fallback serves; alias 'fast', max_tokens 16",
+      "requests": [
+        {
+          "phase": "primary_real",
+          "index": 0,
+          "status": 200,
+          "class": "served",
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "fallback_used": false,
+          "latency_ms": 623.4,
+          "detail": ""
+        },
+        {
+          "phase": "primary_real",
+          "index": 1,
+          "status": 200,
+          "class": "served",
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "fallback_used": false,
+          "latency_ms": 623.67,
+          "detail": ""
+        },
+        {
+          "phase": "primary_real",
+          "index": 2,
+          "status": 200,
+          "class": "served",
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "fallback_used": false,
+          "latency_ms": 937.54,
+          "detail": ""
+        },
+        {
+          "phase": "groq_injected_503",
+          "index": 0,
+          "status": 200,
+          "class": "served",
+          "provider": "openrouter",
+          "model": "meta-llama/llama-3.1-8b-instruct",
+          "fallback_used": true,
+          "latency_ms": 4603.47,
+          "detail": ""
+        },
+        {
+          "phase": "groq_injected_503",
+          "index": 1,
+          "status": 200,
+          "class": "served",
+          "provider": "openrouter",
+          "model": "meta-llama/llama-3.1-8b-instruct",
+          "fallback_used": true,
+          "latency_ms": 4321.27,
+          "detail": ""
+        },
+        {
+          "phase": "groq_injected_503",
+          "index": 2,
+          "status": 200,
+          "class": "served",
+          "provider": "openrouter",
+          "model": "meta-llama/llama-3.1-8b-instruct",
+          "fallback_used": true,
+          "latency_ms": 591.6,
+          "detail": ""
+        }
+      ],
+      "served": 6,
+      "success_rate": 1.0,
+      "by_provider": {
+        "groq": 3,
+        "openrouter": 3
+      },
+      "served_latency_ms": {
+        "count": 6,
+        "p50": 623.67,
+        "p95": 4603.47,
+        "p99": 4603.47,
+        "max": 4603.47
+      },
+      "failures": []
+    }
+  ],
+  "wall_seconds": 137.12
+}

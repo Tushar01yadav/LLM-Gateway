@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-05",
+  "server": {
+    "cmd": "GROQ_API_KEY= OPENROUTER_API_KEY= GEMINI_API_KEY= GATEWAY_ALLOW_CHAOS=1 GATEWAY_ADMIN_TOKEN=<redacted> APP_ENV=development uvicorn app.main:app --host 127.0.0.1 --port 8123 --no-proxy-headers",
+    "browser": "in-app browser, http://127.0.0.1:8123/visualize",
+    "note": "CDP-backed mouse clicks did not land (zoom control stayed 100%), so handlers were invoked with in-page element.click() inside the live page; all requests still went to the running server."
+  },
+  "chaos_bar": {
+    "present": true,
+    "buttons": ["Kill Provider", "Inject Latency", "Reset", "Redis Down", "Redis Up"],
+    "provider_options": ["mock", "mock2", "groq", "openrouter", "gemini"]
+  },
+  "kill_provider_mock": {
+    "ui_status_after_kill": "mock: 503 outage injected",
+    "chat_during_outage": {"http": 502, "detail_contains": "server_error_503", "attempts": 3},
+    "ui_status_after_unbreak": "mock: healthy",
+    "chat_after_unbreak": {"http": 200, "time_total_s": 0.67}
+  },
+  "inject_latency_mock": {
+    "ui_status": "mock: 1500 ms injected",
+    "chat_injected": {
+      "http": 200,
+      "time_total_s": 1.658,
+      "headers": {
+        "x-request-id": "req_1793873149224_c52036ff",
+        "x-provider": "mock",
+        "x-model": "mock-500ms",
+        "x-fallback-used": "false",
+        "x-latency-ms": "1533.61",
+        "x-cost-usd": "0.00000065"
+      }
+    },
+    "ui_status_after_reset": "mock: 0 ms injected",
+    "chat_after_reset": {"http": 200, "time_total_s": 0.646, "x-latency-ms": "525.31"}
+  },
+  "redis_chaos": {
+    "ui_status_down": "redis down: ok",
+    "container_after_down": "llm-gateway-redis exited",
+    "health_while_down": 200,
+    "chat_while_down": {"http": 200, "time_total_s": 2.167, "reading": "memory rate-limit fallback; slower due to Redis connect timeouts"},
+    "ui_status_up": "redis up: ok",
+    "container_after_up": "llm-gateway-redis Up",
+    "chat_after_up": {"http": 200, "time_total_s": 0.649}
+  },
+  "auth_gating": {
+    "inject-failure_no_auth": 403,
+    "inject-latency_no_auth": 403,
+    "redis_no_auth": 403,
+    "inject-latency_unknown_provider_admin": 400
+  },
+  "screenshot": "unavailable: NATIVE_BROWSER_VIEWPORT_UNAVAILABLE (in-app browser surface hidden); DOM readings recorded instead"
+}

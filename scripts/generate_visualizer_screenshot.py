@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 
 async def capture():
     server = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-proxy-headers"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
     )

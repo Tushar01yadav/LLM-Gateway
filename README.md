@@ -1,6 +1,10 @@
 # LLM Gateway
 
-A high-performance reliability, security, and governance layer that sits between your applications and LLM providers. One unified API in front, with automated multi-provider failover, concurrency control, OWASP Top 10 guardrails, cost governance, async jobs with a Dead Letter Queue (DLQ), and a live observability visualizer behind it—so a provider outage, traffic spike, or budget overrun never becomes your outage.
+[![ci](https://github.com/Tushar01yadav/LLM-Gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Tushar01yadav/LLM-Gateway/actions/workflows/ci.yml)
+
+LLM Gateway routes chat requests to configured providers through one API. It includes retries and ordered fallback, per-provider circuit breakers and concurrency limits, heuristic guardrails, budget controls, async jobs with a dead-letter queue, and an SSE-backed visualizer. Verified behavior and known limits are listed in [CLAIMS.md](CLAIMS.md).
+
+**60-second demo:** [docs/demo.md](docs/demo.md).
 
 ---
 
@@ -14,7 +18,7 @@ flowchart LR
         direction TB
         V["Validate input & alias"]
         SEC["Security & Auth<br/>Per-key rate limiting"]
-        GR["OWASP Guardrails<br/>Injection & PII scrub"]
+        GR["Heuristic Guardrails<br/>Injection, secrets, PII flags"]
         CG["Cost Guard<br/>Budget & cache check"]
         GL["Global limit<br/>load shedding"]
         R["Router<br/>models.json registry"]
@@ -53,7 +57,7 @@ flowchart LR
 ## 📸 Interface Showcase
 
 ### 1. Unified LLM Chat Interface
-Operates just like a full-featured, consumer-ready LLM assistant with model switching across multiple providers (`GPT-OSS`, `Llama 3.3 70B`, `Gemini Flash`), voice reactivity, and instant response streaming:
+The interface includes model selection. Provider-specific behavior and known limits are documented in [CLAIMS.md](CLAIMS.md):
 
 ![LLM Gateway Chat Interface](docs/assets/preview_new_chat.png)
 
@@ -61,8 +65,8 @@ Operates just like a full-featured, consumer-ready LLM assistant with model swit
 
 ### 2. Live Observability & Traffic Visualizer
 The built-in **Interactive Topology Visualizer** (`/visualize`) provides real-time tracking of request lifecycles:
-- **Request Node Traveling:** Watch request nodes travel dynamically across cables in real time—entering at **Client Ingress**, passing through **Auth**, **Rate Limiter**, **OWASP Input Guard**, and **Cache**, through the **Router** to upstream provider nodes.
-- **Simulating Burst & Sustained Traffic:** Built-in load testing controls allow you to simulate individual requests, steady streams (e.g. 10 requests over 3s), or high-concurrency **Burst Mode** floods (e.g. 50–100+ simultaneous requests).
+- **Request Node Traveling:** Watch request nodes travel dynamically across cables in real time—entering at **Client Ingress**, passing through **Auth**, **Rate Limiter**, **Heuristic Input Guard**, and **Cache**, through the **Router** to upstream provider nodes.
+- **Simulating Traffic:** Built-in controls support individual requests and steady streams. Burst controls are present, but their 50–100+ simultaneous-request capacity has not been verified.
 - **Safety & Resiliency in Action:** Visually observe how the gateway isolates load: semaphores queue in-flight requests, bulkheads shed excess load (`429 + Retry-After`), and circuit breakers automatically switch from `CLOSED` to `OPEN` to reroute traffic down the fallback cascade.
 
 ![LLM Gateway Live Topology Visualizer](docs/assets/visualizer_traffic.png)
@@ -77,7 +81,7 @@ Inspect provider node health, error trip counters, recovery cooldown timers, and
 ---
 
 ### 4. Real-Time Telemetry & Statistics
-Monitor request throughput, high-availability targets, round-trip latency (P50/P95), token consumption, and provider distribution breakdown:
+Monitor request throughput, high-availability targets, round-trip latency (P50/P95/P99), token consumption, and provider distribution breakdown:
 
 ![LLM Gateway Telemetry & Statistics](docs/assets/preview_stats.png)
 
@@ -111,11 +115,23 @@ Applications that invoke upstream LLM providers directly encounter predictable s
 | **Reliability** | Per-provider circuit breakers (`CLOSED`, `OPEN`, `HALF_OPEN`) | **Built** | `app/reliability.py` |
 | **Concurrency** | Global & per-provider bulkheads, bounded queues, load shedding (`429 + Retry-After`) | **Built** | `app/reliability.py` |
 | **Security** | Gateway API keys, admin verification, sliding-window token bucket (Redis + memory fallback) | **Built** | `app/security.py` |
-| **OWASP Guardrails**| Prompt injection scanner, SSRF private IP blocker, PII/secret scrubbing, system prompt masking | **Built** | `app/guardrails.py`, `docs/security-findings.md` |
+| **Guardrails (heuristic)** | Prompt-injection pattern scan (NFKC/zero-width/control-normalized), SSRF private-IP blocker, hard-secret redaction, PII flagging without silent rewriting, system-prompt masking | **Built** | `app/guardrails.py`, `docs/security-findings.md` |
 | **Cost & Budget** | Per-model token calculation, daily budget caps, response caching, request coalescing | **Built** | `app/cost.py` |
 | **Async Jobs** | Background job queue (`/v1/jobs`), idempotency keys, Dead Letter Queue (DLQ) with `/replay` | **Built** | `app/jobs.py` |
 | **Observability** | Live visualizer dashboard and real-time Server-Sent Events (`/api/reliability/traffic-stream`) | **Built** | `app/main.py`, `/visualize` |
 | **Observability** | Prometheus metrics export & OpenTelemetry distributed tracing | Planned | Next iteration |
+
+### Guardrail scope (heuristic baseline)
+
+The guardrails are a **heuristic baseline**, not a boundary that stops every prompt injection. They are deterministic pattern/heuristic scans with a bounded normalization step (NFKC, zero-width/control stripping, case-folding). Known bypass classes that still pass:
+
+- Cross-script homoglyphs (e.g. Cyrillic `і` inside "ignore")
+- Letter-spaced or token-obfuscated instructions ("i g n o r e ...")
+- Encoded payloads (base64, rot13) that the model decodes
+- Paraphrases outside the fixed pattern set
+- Multi-turn or indirect injection carried through retrieved content
+
+Hard secrets (API keys, SSN, cards, JWTs, private keys) are redacted. Personal identifiers (email, phone) are **flagged in audit records and left untouched** — they are never silently rewritten. Treat this as one defensive layer, not the only one.
 
 ---
 
@@ -127,9 +143,9 @@ flowchart TD
     V -->|Bad input or payload > 1MB| E400[HTTP 400 / 413]
     V --> AUTH[Verify API Key & Rate Limit]
     AUTH -->|Quota exceeded| E429_R[HTTP 429 Rate Limit]
-    AUTH --> OWASP[OWASP Guardrails Check]
-    OWASP -->|Prompt injection or SSRF| E400_SEC[HTTP 400 Blocked]
-    OWASP --> COST[Check Daily Budget & Cache]
+    AUTH --> GUARD[Heuristic Guardrails Check]
+    GUARD -->|Prompt injection or SSRF| E400_SEC[HTTP 400 Blocked]
+    GUARD --> COST[Check Daily Budget & Cache]
     COST -->|Budget depleted| E429_B[HTTP 429 Budget Cap]
     COST -->|Cache Hit| RET_CACHE[Return Cached Completion]
     COST --> G[Global Concurrency Limit Check]
@@ -200,17 +216,73 @@ Key `.env` parameters:
 GROQ_API_KEY=gsk_your_groq_api_key
 OPENROUTER_API_KEY=sk-or-your_openrouter_key
 GEMINI_API_KEY=your_gemini_key
-ADMIN_SECRET_KEY=your_secure_admin_key
+GATEWAY_ADMIN_TOKEN=your_secure_admin_token
+TRUSTED_PROXY_COUNT=0
+RATE_LIMIT_FAIL_MODE=closed
 ```
 
 ### 3. Running the Gateway
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-proxy-headers
 ```
+
+Production start command (no reload, one process per worker; Redis shared):
+
+```bash
+APP_ENV=production \
+TRUSTED_PROXY_COUNT=1 \
+GATEWAY_ADMIN_TOKEN="$(cat /run/secrets/gateway_admin_token)" \
+REDIS_URL=redis://redis:6379/0 \
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers --workers 2
+```
+
+At startup the app validates the deploy configuration and refuses to start in
+production when `TRUSTED_PROXY_COUNT > 0` but uvicorn proxy headers are not
+provably disabled (`--no-proxy-headers`, or `GATEWAY_PROXY_HEADERS_DISABLED=1`
+for non-CLI launchers such as gunicorn). With `APP_ENV=production` and
+`TRUSTED_PROXY_COUNT=0` it logs a warning: if a reverse proxy is in front,
+per-IP limits would otherwise all bucket on the proxy address.
+
+> **Proxy headers:** always run uvicorn with `--no-proxy-headers`. Uvicorn's
+> default middleware rewrites `request.client` from `X-Forwarded-For` for
+> localhost peers, which would silently bypass `TRUSTED_PROXY_COUNT`.
+> Set `TRUSTED_PROXY_COUNT` to the number of reverse proxies in front of the
+> gateway (0 when directly exposed). The client IP is then taken from the
+> Nth entry from the right of `X-Forwarded-For`; when 0, the header is ignored.
+> `RATE_LIMIT_FAIL_MODE=open|closed` overrides the models.json Redis-outage
+> policy (open = allow requests while Redis is down, closed = reject with 429).
 
 - **Gateway Dashboard & Live Visualizer:** `http://localhost:8000/visualize`
 - **Health Check:** `http://localhost:8000/health`
+
+### 4. Docker
+
+```bash
+docker build -t llm-gateway .
+docker run --rm -p 8000:8000 \
+  -e GATEWAY_ADMIN_TOKEN=change-me \
+  -e GROQ_API_KEY=... -e OPENROUTER_API_KEY=... -e GEMINI_API_KEY=... \
+  llm-gateway
+```
+
+The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`.
+`gateway.db` is created inside the container; mount a volume at `/app` (or
+`/app/gateway.db`) to persist sessions, keys, and logs across restarts.
+
+### 5. One-command demo (Docker Compose)
+
+```bash
+docker compose up --build
+```
+
+Starts the gateway, Redis, and a load generator. The load generator drives the
+built-in mock providers, so **no provider API keys are needed**: it checks
+health, sends a chat request, inspects the response headers, injects a 503 fault
+on `mock`, and confirms `mock_failover` serves the request from `mock2` with
+`X-Fallback-Used: true`. The dashboard is at `http://localhost:8000/visualize`
+(open Settings and paste `demo-admin-token` to unlock admin panels).
+Use `docker compose down -v` to remove the demo stack.
 
 ```bash
 # Example chat completion request
@@ -223,6 +295,10 @@ curl -X POST http://localhost:8000/v1/chat \
     ]
   }'
 ```
+
+Anonymous callers are a supported guest path: `/v1/chat` without an API key or
+session cookie is served under a per-IP guest quota. Invalid or revoked keys are
+still rejected with `401`.
 
 ---
 
@@ -255,13 +331,13 @@ All routing chains, fallback targets, concurrency quotas, guardrail parameters, 
   },
   "fast": {
     "provider": "groq",
-    "model": "llama-3.3-70b-versatile",
+    "model": "openai/gpt-oss-120b",
     "fallback": [
-      { "provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct" },
-      { "provider": "gemini", "model": "gemini-1.5-flash" }
+      { "provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct" },
+      { "provider": "gemini", "model": "gemini-2.5-flash" }
     ],
     "input_price_per_token": 0.00000005,
-    "output_price_per_token": 0.0000002,
+    "output_price_per_token": 0.00000008,
     "context_limit": 131072
   }
 }
@@ -301,13 +377,16 @@ All routing chains, fallback targets, concurrency quotas, guardrail parameters, 
 ## Testing
 
 ```bash
+# Install test dependencies (pytest, pytest-asyncio)
+pip install -r requirements-dev.txt
+
 # Run the entire test suite
 pytest tests/ -v
 
 # Run mocked unit tests (no external API keys required)
 pytest tests/test_reliability_mocked.py tests/test_concurrency_mocked.py -v
 
-# Run OWASP Top 10 security regression suite
+# Run guardrail regression suite (heuristic baseline + SSRF/PII policy)
 pytest tests/test_owasp_guardrails.py -v
 
 # Run async jobs & DLQ tests
@@ -327,3 +406,9 @@ When sharing this repository with LLM coding assistants (ChatGPT, Claude, Cursor
 - **Use Claude Projects:** Connect this repository directly via Claude's GitHub integration for native indexing and search.
 - **Use Gitingest / Repomix:** Prefix the URL with `gitingest.com` (e.g., `https://gitingest.com/Tushar01yadav/LLM-Gateway`) or run `npx repomix` to bundle clean, token-efficient source context.
 - **Clean Context:** Scratch files, local databases, and temporary development artifacts are excluded via `.gitignore` to prevent context token bloat.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

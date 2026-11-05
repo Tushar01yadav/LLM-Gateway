@@ -1,0 +1,49 @@
+# One-command local demo: gateway + Redis + built-in mock providers + load generator.
+#   docker compose up --build
+# No provider API keys are required: the load generator drives the built-in
+# mock/mock2 adapters and demonstrates the fallback chain.
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build: .
+    environment:
+      APP_ENV: development
+      GATEWAY_ADMIN_TOKEN: demo-admin-token
+      REDIS_URL: redis://redis:6379/0
+      TRUSTED_PROXY_COUNT: "0"
+      GATEWAY_PROXY_HEADERS_DISABLED: "1"
+      GROQ_API_KEY: ""
+      OPENROUTER_API_KEY: ""
+      GEMINI_API_KEY: ""
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  loadgen:
+    image: python:3.10-slim
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      GATEWAY_ADMIN_TOKEN: demo-admin-token
+    volumes:
+      - ./scripts/compose_demo_load.py:/demo.py:ro
+    command: ["python", "/demo.py"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: "no"

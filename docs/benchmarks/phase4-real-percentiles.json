@@ -1,0 +1,125 @@
+{
+  "generated_at": "2026-11-05T07:19:29Z",
+  "server": {
+    "port": 8060,
+    "redis_db": 15,
+    "db": "gateway.db",
+    "admin_token": "<redacted>"
+  },
+  "real_calls": [
+    {
+      "status": 200,
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "fallback_used": false,
+      "attempts": [
+        {
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "attempt": 1,
+          "status": "success",
+          "error_type": null,
+          "latency_ms": 472.8,
+          "queue_wait_ms": 0.0
+        }
+      ],
+      "latency_ms": 497.85,
+      "error": null
+    },
+    {
+      "status": 200,
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "fallback_used": false,
+      "attempts": [
+        {
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "attempt": 1,
+          "status": "success",
+          "error_type": null,
+          "latency_ms": 522.45,
+          "queue_wait_ms": 0.0
+        }
+      ],
+      "latency_ms": 547.03,
+      "error": null
+    },
+    {
+      "status": 200,
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "fallback_used": false,
+      "attempts": [
+        {
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "attempt": 1,
+          "status": "success",
+          "error_type": null,
+          "latency_ms": 394.32,
+          "queue_wait_ms": 0.0
+        }
+      ],
+      "latency_ms": 416.37,
+      "error": null
+    },
+    {
+      "status": 200,
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "fallback_used": false,
+      "attempts": [
+        {
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "attempt": 1,
+          "status": "success",
+          "error_type": null,
+          "latency_ms": 486.07,
+          "queue_wait_ms": 0.0
+        }
+      ],
+      "latency_ms": 503.41,
+      "error": null
+    }
+  ],
+  "api_stats": {
+    "sample_size": 1696,
+    "window_seconds": 3600,
+    "overall": {
+      "count": 1696,
+      "p50": 700.54,
+      "p95": 5540.84,
+      "p99": 16121.59,
+      "avg": 1587.16,
+      "max": 18241.97
+    },
+    "by_provider": {
+      "groq": {
+        "count": 13,
+        "p50": 472.12,
+        "p95": 769.4,
+        "p99": 769.4,
+        "avg": 321.21,
+        "max": 769.4
+      },
+      "openrouter": {
+        "count": 3,
+        "p50": 4186.75,
+        "p95": 4502.38,
+        "p99": 4502.38,
+        "avg": 3055.95,
+        "max": 4502.38
+      }
+    }
+  },
+  "browser_inspector": {
+    "url": "http://127.0.0.1:8060/visualize",
+    "groq": "p50 472.12ms \u00b7 p95 769.4ms \u00b7 p99 769.4ms",
+    "openrouter": "p50 4186.75ms \u00b7 p95 4502.38ms \u00b7 p99 4502.38ms",
+    "stats_card": "p50 700.54ms \u00b7 p95 5540.84ms \u00b7 p99 16121.59ms",
+    "stats_card_sample": "1696 samples in last 60m",
+    "note": "Values read from the live DOM (innerText) after openNodeInspector(); screenshot unavailable because the in-app browser surface was hidden."
+  }
+}

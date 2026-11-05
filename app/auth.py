@@ -12,9 +12,10 @@ import time
 import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,6 +25,54 @@ logger.setLevel(logging.INFO)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(PROJECT_ROOT, "gateway.db")
+
+APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
+IS_DEV_ENV = APP_ENV in ("dev", "development", "local", "test")
+COOKIE_SECURE = not IS_DEV_ENV
+OTP_MAX_REQUESTS_PER_EMAIL = 5
+OTP_MAX_REQUESTS_PER_IP = 20
+OTP_REQUEST_WINDOW_MINUTES = 15
+OTP_MAX_VERIFY_ATTEMPTS = 5
+OAUTH_STATE_TTL_SECONDS = 600
+
+# OAuth tokens are encrypted at rest. Set GATEWAY_OAUTH_ENCRYPTION_KEY to a
+# Fernet key to allow rotating GATEWAY_ADMIN_TOKEN without losing stored tokens;
+# otherwise the key is derived from the admin token for a zero-config default.
+_ENC_PREFIX = "enc:v1:"
+
+
+def _oauth_cipher() -> Fernet:
+    configured = os.getenv("GATEWAY_OAUTH_ENCRYPTION_KEY", "").strip()
+    if configured:
+        return Fernet(configured.encode("utf-8"))
+    seed = os.getenv("GATEWAY_ADMIN_TOKEN", "")
+    derived = base64.urlsafe_b64encode(hashlib.sha256(f"oauth-tokens:{seed}".encode("utf-8")).digest())
+    return Fernet(derived)
+
+
+def encrypt_oauth_secret(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return value
+    if value.startswith(_ENC_PREFIX):
+        return value
+    return _ENC_PREFIX + _oauth_cipher().encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_oauth_secret(value: Optional[str]) -> Optional[str]:
+    if not value or not value.startswith(_ENC_PREFIX):
+        return value
+    try:
+        return _oauth_cipher().decrypt(value[len(_ENC_PREFIX):].encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        logger.error("Stored OAuth token could not be decrypted; the encryption key changed.")
+        return None
+
+
+def public_user(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Returns a user dict safe to send to clients (never includes the password hash)."""
+    if not user:
+        return None
+    return {k: v for k, v in user.items() if k != "password_hash"}
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +166,20 @@ def init_auth_db():
             otp_code TEXT NOT NULL,
             expires_at REAL NOT NULL,
             is_used INTEGER DEFAULT 0,
+            attempts INTEGER DEFAULT 0,
+            ip_address TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    for ddl in (
+        "ALTER TABLE otp_verifications ADD COLUMN attempts INTEGER DEFAULT 0",
+        "ALTER TABLE otp_verifications ADD COLUMN ip_address TEXT",
+    ):
+        try:
+            cursor.execute(ddl)
+        except Exception:
+            pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_sessions (
@@ -140,6 +200,15 @@ def init_auth_db():
             email TEXT,
             scopes TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_states (
+            state TEXT PRIMARY KEY,
+            code_verifier TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -553,6 +622,29 @@ def db_create_user(
     return db_get_user_by_email(clean_email)  # type: ignore
 
 
+def db_delete_unverified_user(email: str) -> bool:
+    """
+    Rollback helper for failed signup dispatch. Removes an unverified account
+    and any OTP rows issued for it, so a 503 never leaves a half-created user
+    behind. Verified accounts are never touched.
+    """
+    clean_email = email.strip().lower()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM otp_verifications WHERE lower(email) = lower(?)",
+        (clean_email,),
+    )
+    cursor.execute(
+        "DELETE FROM users WHERE lower(email) = lower(?) AND is_verified = 0",
+        (clean_email,),
+    )
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 def db_mark_user_verified(email: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -607,7 +699,36 @@ def db_delete_session(token: str):
 # ---------------------------------------------------------------------------
 # 5. OTP Storage & Verification
 # ---------------------------------------------------------------------------
-def db_create_otp(email: str, expiry_minutes: int = 10) -> str:
+def check_otp_rate_limit(email: str, ip_address: Optional[str]) -> Tuple[bool, str]:
+    """Caps OTP creation per email and per source IP inside a rolling window."""
+    clean_email = email.strip().lower()
+    window = f"-{OTP_REQUEST_WINDOW_MINUTES} minutes"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM otp_verifications WHERE lower(email) = lower(?) AND created_at >= datetime('now', ?)",
+        (clean_email, window),
+    )
+    email_count = cursor.fetchone()[0] or 0
+
+    ip_count = 0
+    if ip_address:
+        cursor.execute(
+            "SELECT COUNT(*) FROM otp_verifications WHERE ip_address = ? AND created_at >= datetime('now', ?)",
+            (ip_address, window),
+        )
+        ip_count = cursor.fetchone()[0] or 0
+    conn.close()
+
+    if email_count >= OTP_MAX_REQUESTS_PER_EMAIL:
+        return False, f"Too many verification codes requested. Try again in {OTP_REQUEST_WINDOW_MINUTES} minutes."
+    if ip_address and ip_count >= OTP_MAX_REQUESTS_PER_IP:
+        return False, f"Too many verification codes requested from this address. Try again in {OTP_REQUEST_WINDOW_MINUTES} minutes."
+    return True, ""
+
+
+def db_create_otp(email: str, expiry_minutes: int = 10, ip_address: Optional[str] = None) -> str:
     """Generate and store a 6-digit numeric OTP."""
     otp_code = f"{secrets.randbelow(900000) + 100000}"
     expires_at = time.time() + (expiry_minutes * 60)
@@ -618,8 +739,8 @@ def db_create_otp(email: str, expiry_minutes: int = 10) -> str:
     # Invalidate previous unexpired OTPs for this email
     cursor.execute("UPDATE otp_verifications SET is_used = 1 WHERE lower(email) = lower(?)", (clean_email,))
     cursor.execute(
-        "INSERT INTO otp_verifications (email, otp_code, expires_at, is_used) VALUES (?, ?, ?, 0)",
-        (clean_email, otp_code, expires_at),
+        "INSERT INTO otp_verifications (email, otp_code, expires_at, is_used, attempts, ip_address) VALUES (?, ?, ?, 0, 0, ?)",
+        (clean_email, otp_code, expires_at, ip_address),
     )
     conn.commit()
     conn.close()
@@ -634,8 +755,8 @@ def db_verify_otp(email: str, entered_code: str) -> Tuple[bool, str]:
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, otp_code, expires_at, is_used 
-        FROM otp_verifications 
+        SELECT id, otp_code, expires_at, is_used, attempts
+        FROM otp_verifications
         WHERE lower(email) = lower(?) AND is_used = 0
         ORDER BY id DESC LIMIT 1
         """,
@@ -646,14 +767,22 @@ def db_verify_otp(email: str, entered_code: str) -> Tuple[bool, str]:
         conn.close()
         return False, "No active OTP found. Please request a new verification code."
 
-    otp_id, actual_code, expires_at, is_used = row
+    otp_id, actual_code, expires_at, is_used, attempts = row
     if time.time() > expires_at:
         cursor.execute("UPDATE otp_verifications SET is_used = 1 WHERE id = ?", (otp_id,))
         conn.commit()
         conn.close()
         return False, "Verification code has expired. Please request a new one."
 
-    if actual_code != clean_code:
+    if attempts >= OTP_MAX_VERIFY_ATTEMPTS:
+        cursor.execute("UPDATE otp_verifications SET is_used = 1 WHERE id = ?", (otp_id,))
+        conn.commit()
+        conn.close()
+        return False, "Too many incorrect attempts. Please request a new verification code."
+
+    if not secrets.compare_digest(actual_code, clean_code):
+        cursor.execute("UPDATE otp_verifications SET attempts = attempts + 1 WHERE id = ?", (otp_id,))
+        conn.commit()
         conn.close()
         return False, "Incorrect verification code. Please check your email and try again."
 
@@ -679,6 +808,8 @@ def db_save_oauth_tokens(
     scopes: Optional[str] = None,
 ):
     expires_at = time.time() + expires_in
+    access_token = encrypt_oauth_secret(access_token)
+    refresh_token = encrypt_oauth_secret(refresh_token)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -728,12 +859,49 @@ def db_get_oauth_tokens(key: str) -> Optional[Dict[str, Any]]:
         return None
     return {
         "key": row[0],
-        "access_token": row[1],
-        "refresh_token": row[2],
+        "access_token": decrypt_oauth_secret(row[1]),
+        "refresh_token": decrypt_oauth_secret(row[2]),
         "expires_at": row[3],
         "email": row[4],
         "scopes": row[5],
     }
+
+
+def db_create_oauth_state(state: str, code_verifier: str) -> None:
+    """Persist a single-use OAuth state bound to its PKCE verifier."""
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM oauth_states WHERE expires_at < ?", (time.time(),))
+    cursor.execute(
+        "INSERT INTO oauth_states (state, code_verifier, expires_at) VALUES (?, ?, ?)",
+        (state, code_verifier, time.time() + OAUTH_STATE_TTL_SECONDS),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_consume_oauth_state(state: str) -> Optional[str]:
+    """Atomically consume a state row and return its PKCE verifier.
+
+    Returns None for unknown, expired, or already-used states so a replayed
+    callback cannot exchange the authorization code again.
+    """
+    if not state:
+        return None
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    cursor = conn.cursor()
+    cursor.execute("BEGIN IMMEDIATE")
+    cursor.execute(
+        "SELECT code_verifier, expires_at FROM oauth_states WHERE state = ?",
+        (state,),
+    )
+    row = cursor.fetchone()
+    cursor.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+    conn.commit()
+    conn.close()
+    if not row or row[1] < time.time():
+        return None
+    return row[0]
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +1121,8 @@ async def dispatch_otp_email(to_email: str, otp_code: str) -> Dict[str, Any]:
     Deliver OTP to user:
     1. Try Gmail API with OAuth scope https://www.googleapis.com/auth/gmail.send
     2. Try SMTP if configured in .env
-    3. Always log to console & provide dev_otp so registration is 100% reliable!
+    3. In development mode only, log the code to the server console.
+       In production, refuse rather than silently degrade to an insecure path.
     """
     clean_email = to_email.strip().lower()
     subject = f"✦ {otp_code} is your LLM Gateway verification code"
@@ -996,14 +1165,23 @@ async def dispatch_otp_email(to_email: str, otp_code: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"SMTP send failed: {e}")
 
-    # 3. Development / Immediate Fallback
-    logger.info(f"============================================================")
-    logger.info(f"[DEV / LOCAL OTP] Verification code for {clean_email}: {otp_code}")
-    logger.info(f"============================================================")
+    # 3. Development-only console fallback. Never return the code to the client.
+    if IS_DEV_ENV:
+        logger.info("============================================================")
+        logger.info(f"[DEV / LOCAL OTP] Verification code for {clean_email}: {otp_code}")
+        logger.info("============================================================")
+        return {
+            "success": True,
+            "method": "dev_console",
+            "message": f"Verification code generated for {clean_email}. Check the server console (development mode).",
+        }
 
+    logger.error(
+        f"[OTP DISPATCH] No email delivery configured for {clean_email}. "
+        "Set SMTP_HOST/SMTP_USER/SMTP_PASS or connect Gmail in production."
+    )
     return {
-        "success": True,
-        "method": "dev_console",
-        "dev_otp": otp_code,
-        "message": f"Verification code generated for {clean_email} (Dev code: {otp_code})",
+        "success": False,
+        "method": "none",
+        "message": "Email delivery is not configured. Ask the administrator to configure SMTP or Gmail.",
     }

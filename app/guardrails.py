@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 import urllib.parse
 from ipaddress import ip_address
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,15 +68,33 @@ INJECTION_PATTERNS = [
 # ---------------------------------------------------------------------------
 # 2. OWASP LLM02: Sensitive Data & Secret Detection Patterns
 # ---------------------------------------------------------------------------
+# Hard secrets are redacted when policy allows. Personal identifiers (email,
+# phone) are only flagged or blocked; they are never silently rewritten.
 SECRET_PATTERNS = {
     "api_key_generic": re.compile(r"(?:sk-[a-zA-Z0-9]{24,}|gsk_[a-zA-Z0-9]{20,}|AIzaSy[0-9A-Za-z-_]{33}|gw_live_[0-9a-zA-Z_-]{20,})"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "credit_card": re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b"),
     "jwt_token": re.compile(r"\beyJ[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\.[a-zA-Z0-9-_]+\b"),
     "private_key": re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----"),
+}
+
+PII_PATTERNS = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
     "phone": re.compile(r"\b(?:\+?1[-. ]?)?\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b"),
 }
+
+# Zero-width and control characters are invisible in rendered text but break
+# naive substring matching, so they are removed before scanning.
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def normalize_for_scan(text: str) -> str:
+    """NFKC-normalize, strip invisible/control chars, case-fold for matching."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = _INVISIBLE_RE.sub("", text)
+    text = _CONTROL_RE.sub("", text)
+    return text.casefold()
 
 # ---------------------------------------------------------------------------
 # 3. OWASP LLM06: SSRF URL Scanner
@@ -167,11 +186,13 @@ class GuardrailsEngine:
         for msg in messages:
             content = str(msg.get("content", ""))
             total_text_len += len(content)
+            scan_content = normalize_for_scan(content)
 
-            # Check prompt injection patterns (LLM01)
+            # Check prompt injection patterns (LLM01) against the normalized copy.
             for pat in INJECTION_PATTERNS:
-                if pat.search(content):
-                    match_snippet = pat.search(content).group(0)
+                match = pat.search(scan_content)
+                if match:
+                    match_snippet = match.group(0)
                     hits.append({"type": "prompt_injection", "pattern": match_snippet, "owasp": "LLM01"})
                     logger.warning(f"[GUARDRAILS] Blocked prompt injection pattern: '{match_snippet}'")
                     raise HTTPException(
@@ -179,8 +200,9 @@ class GuardrailsEngine:
                         detail=f"Security guardrail blocked request: Prompt injection pattern detected ('{match_snippet}') (OWASP LLM01).",
                     )
 
-            # Check SSRF URLs (LLM06)
-            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', content)
+            # Check SSRF URLs (LLM06) after normalization so split/sneaky URLs
+            # are scanned in the form a model would actually read.
+            urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', scan_content)
             for u in urls:
                 safe, reason = check_ssrf_safety(u)
                 if not safe:
@@ -191,19 +213,38 @@ class GuardrailsEngine:
                         detail=f"Security guardrail blocked request: {reason} (OWASP LLM06).",
                     )
 
-            # Check PII / Secrets (LLM02)
+            # Hard secrets are redacted. Personal identifiers are only flagged
+            # (or blocked per block_on_pii policy); we never rewrite them.
             cleaned_content = content
+            redactable = _CONTROL_RE.sub("", _INVISIBLE_RE.sub("", content))
+            redacted = False
             for sec_name, sec_regex in SECRET_PATTERNS.items():
-                if sec_regex.search(content):
+                if sec_regex.search(scan_content):
                     hits.append({"type": "sensitive_data", "kind": sec_name, "owasp": "LLM02"})
                     if should_block_pii:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Security guardrail blocked request: Sensitive data/secret detected ({sec_name}) (OWASP LLM02).",
                         )
-                    # Redact
-                    cleaned_content = sec_regex.sub(f"[REDACTED_{sec_name.upper()}]", cleaned_content)
+                    redactable = sec_regex.sub(f"[REDACTED_{sec_name.upper()}]", redactable)
+                    redacted = True
 
+            for pii_name, pii_regex in PII_PATTERNS.items():
+                if pii_regex.search(scan_content):
+                    hits.append({
+                        "type": "sensitive_data",
+                        "kind": pii_name,
+                        "action": "flagged",
+                        "owasp": "LLM02",
+                    })
+                    if should_block_pii:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Security guardrail blocked request: Sensitive data detected ({pii_name}) (OWASP LLM02).",
+                        )
+
+            if redacted:
+                cleaned_content = redactable
             sanitized_messages.append({"role": msg.get("role", "user"), "content": cleaned_content})
 
         # Token limit check (estimated 4 chars per token)
@@ -244,7 +285,18 @@ class GuardrailsEngine:
                 output_hits.append({"type": "output_leak_prevented", "kind": sec_name, "owasp": "LLM02"})
                 sanitized = sec_regex.sub(f"[REDACTED_{sec_name.upper()}]", sanitized)
 
-        # 2. Check environment variables to ensure zero provider key leakage
+        # 2. Personal identifiers are flagged for audit, never rewritten.
+        scan_sanitized = normalize_for_scan(sanitized)
+        for pii_name, pii_regex in PII_PATTERNS.items():
+            if pii_regex.search(scan_sanitized):
+                output_hits.append({
+                    "type": "output_pii_flagged",
+                    "kind": pii_name,
+                    "action": "flagged",
+                    "owasp": "LLM02",
+                })
+
+        # 3. Check environment variables to ensure zero provider key leakage
         for env_k, env_v in os.environ.items():
             if ("KEY" in env_k or "TOKEN" in env_k or "SECRET" in env_k) and len(env_v) >= 12:
                 if env_v in sanitized:

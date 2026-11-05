@@ -1,0 +1,1497 @@
+{
+  "generated_at": "2026-11-05T06:43:47.469879+00:00",
+  "environment": {
+    "machine": "COGLAP021",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "cpu_count": 8,
+    "python": "3.10.11",
+    "git_commit": "7100ba8",
+    "redis": {
+      "available": true,
+      "version": "7.4.11",
+      "rtt_ms_avg_10_gets": 1.29
+    },
+    "providers": "mocked (alias 'mock', MockAdapter)",
+    "profile": "overload",
+    "mock_latency_profile": "grows 500 ms + 150 ms per in-flight request; 503 above 12 in-flight",
+    "overload_settings": {
+      "GATEWAY_MOCK_OVERLOAD": "1",
+      "GATEWAY_MOCK_OVERLOAD_BASE_MS": "500",
+      "GATEWAY_MOCK_OVERLOAD_SLOPE_MS": "150",
+      "GATEWAY_MOCK_OVERLOAD_ERROR_AT": "12"
+    },
+    "rate_limiter": "Redis token bucket (quota=100000 rpm, so limiter is not the bottleneck)",
+    "load": {
+      "total_requests": 120,
+      "concurrency": 60,
+      "alias": "mock"
+    },
+    "memory_total_gb": 15.8
+  },
+  "load": {
+    "total_requests": 120,
+    "concurrency": 60,
+    "seed": 20261104,
+    "repeats": 3
+  },
+  "scenarios": {
+    "before": [
+      {
+        "counters": {
+          "served": 50,
+          "rate_limit_429": 0,
+          "load_shed_429": 0,
+          "error_5xx": 70,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "502": 70,
+          "200": 50
+        },
+        "wall_seconds": 12.186,
+        "requests_per_second": 9.8,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 5052.98,
+          "p95": 6097.52,
+          "p99": 7545.37,
+          "avg": 3856.96,
+          "max": 7668.98
+        },
+        "client_latency_served_only_ms": {
+          "count": 50,
+          "p50": 3997.44,
+          "p95": 7517.59,
+          "p99": 7668.98,
+          "avg": 3982.75,
+          "max": 7668.98
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861044.7836542,
+          "overall": {
+            "count": 1826,
+            "p50": 709.48,
+            "p95": 5564.48,
+            "p99": 16082.37,
+            "avg": 1705.43,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 709.48,
+              "p95": 5564.48,
+              "p99": 16082.37,
+              "avg": 1705.43,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1519,
+              "p50": 692.35,
+              "p95": 4361.54,
+              "p99": 5234.44,
+              "avg": 1063.77,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 70,
+              "p50": 5480.7,
+              "p95": 5760.98,
+              "p99": 5914.67,
+              "avg": 3639.26,
+              "max": 5914.67
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 64,
+              "p50": 2623.94,
+              "p95": 5495.34,
+              "p99": 6374.26,
+              "avg": 2648.43,
+              "max": 6374.26
+            },
+            "": {
+              "count": 70,
+              "p50": 5480.7,
+              "p95": 5760.98,
+              "p99": 5914.67,
+              "avg": 3639.26,
+              "max": 5914.67
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 70,
+              "p50": 5480.7,
+              "p95": 5760.98,
+              "p99": 5914.67,
+              "avg": 3639.26,
+              "max": 5914.67,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 64,
+              "p50": 2623.94,
+              "p95": 5495.34,
+              "p99": 6374.26,
+              "avg": 2648.43,
+              "max": 6374.26,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 0,
+        "peak_mock_in_flight": 0,
+        "peak_mock_queue_depth": 0,
+        "scenario_server_latency_ms": {
+          "count": 50,
+          "p50": 3337.29,
+          "p95": 6199.34,
+          "p99": 6374.26,
+          "avg": 3236.21,
+          "max": 6374.26
+        },
+        "baseline": {
+          "health_rtt_ms": 9.31,
+          "concurrent_health_60_wall_ms": 668.7
+        }
+      },
+      {
+        "counters": {
+          "served": 37,
+          "rate_limit_429": 0,
+          "load_shed_429": 0,
+          "error_5xx": 83,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "502": 83,
+          "200": 37
+        },
+        "wall_seconds": 9.377,
+        "requests_per_second": 12.8,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 1625.98,
+          "p95": 6008.41,
+          "p99": 6861.76,
+          "avg": 2672.77,
+          "max": 7076.72
+        },
+        "client_latency_served_only_ms": {
+          "count": 37,
+          "p50": 4234.37,
+          "p95": 6861.76,
+          "p99": 7076.72,
+          "avg": 4538.05,
+          "max": 7076.72
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861074.9635525,
+          "overall": {
+            "count": 1826,
+            "p50": 710.18,
+            "p95": 5539.72,
+            "p99": 16082.37,
+            "avg": 1622.12,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 710.18,
+              "p95": 5539.72,
+              "p99": 16082.37,
+              "avg": 1622.12,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1506,
+              "p50": 689.46,
+              "p95": 4399.83,
+              "p99": 5496.21,
+              "avg": 1049.57,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 83,
+              "p50": 1416.69,
+              "p95": 4857.04,
+              "p99": 4928.59,
+              "avg": 1660.75,
+              "max": 4928.59
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 51,
+              "p50": 2163.39,
+              "p95": 5850.86,
+              "p99": 6228.29,
+              "avg": 2633.02,
+              "max": 6228.29
+            },
+            "": {
+              "count": 83,
+              "p50": 1416.69,
+              "p95": 4857.04,
+              "p99": 4928.59,
+              "avg": 1660.75,
+              "max": 4928.59
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 83,
+              "p50": 1416.69,
+              "p95": 4857.04,
+              "p99": 4928.59,
+              "avg": 1660.75,
+              "max": 4928.59,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 51,
+              "p50": 2163.39,
+              "p95": 5850.86,
+              "p99": 6228.29,
+              "avg": 2633.02,
+              "max": 6228.29,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 0,
+        "peak_mock_in_flight": 0,
+        "peak_mock_queue_depth": 0,
+        "scenario_server_latency_ms": {
+          "count": 37,
+          "p50": 2326.61,
+          "p95": 6013.3,
+          "p99": 6228.29,
+          "avg": 3421.49,
+          "max": 6228.29
+        },
+        "baseline": {
+          "health_rtt_ms": 4.18,
+          "concurrent_health_60_wall_ms": 248.4
+        }
+      },
+      {
+        "counters": {
+          "served": 49,
+          "rate_limit_429": 0,
+          "load_shed_429": 0,
+          "error_5xx": 71,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "502": 71,
+          "200": 49
+        },
+        "wall_seconds": 11.24,
+        "requests_per_second": 10.7,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 4004.25,
+          "p95": 5826.47,
+          "p99": 7428.71,
+          "avg": 3505.73,
+          "max": 7444.04
+        },
+        "client_latency_served_only_ms": {
+          "count": 49,
+          "p50": 3397.0,
+          "p95": 7071.69,
+          "p99": 7444.04,
+          "avg": 3645.83,
+          "max": 7444.04
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861103.296782,
+          "overall": {
+            "count": 1826,
+            "p50": 709.77,
+            "p95": 5538.54,
+            "p99": 16082.37,
+            "avg": 1685.43,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 709.77,
+              "p95": 5538.54,
+              "p99": 16082.37,
+              "avg": 1685.43,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1518,
+              "p50": 693.29,
+              "p95": 4326.84,
+              "p99": 5230.26,
+              "avg": 1054.34,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 71,
+              "p50": 4961.94,
+              "p95": 5351.22,
+              "p99": 5464.96,
+              "avg": 3290.08,
+              "max": 5464.96
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 63,
+              "p50": 2149.68,
+              "p95": 5231.27,
+              "p99": 6484.76,
+              "avg": 2446.49,
+              "max": 6484.76
+            },
+            "": {
+              "count": 71,
+              "p50": 4961.94,
+              "p95": 5351.22,
+              "p99": 5464.96,
+              "avg": 3290.08,
+              "max": 5464.96
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 71,
+              "p50": 4961.94,
+              "p95": 5351.22,
+              "p99": 5464.96,
+              "avg": 3290.08,
+              "max": 5464.96,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 63,
+              "p50": 2149.68,
+              "p95": 5231.27,
+              "p99": 6484.76,
+              "avg": 2446.49,
+              "max": 6484.76,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 0,
+        "peak_mock_in_flight": 0,
+        "peak_mock_queue_depth": 0,
+        "scenario_server_latency_ms": {
+          "count": 49,
+          "p50": 3287.24,
+          "p95": 6070.41,
+          "p99": 6484.76,
+          "avg": 2988.57,
+          "max": 6484.76
+        },
+        "baseline": {
+          "health_rtt_ms": 4.01,
+          "concurrent_health_60_wall_ms": 296.5
+        }
+      }
+    ],
+    "after": [
+      {
+        "counters": {
+          "served": 42,
+          "rate_limit_429": 0,
+          "load_shed_429": 78,
+          "error_5xx": 0,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "429": 78,
+          "200": 42
+        },
+        "wall_seconds": 10.632,
+        "requests_per_second": 11.3,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 2649.58,
+          "p95": 8378.14,
+          "p99": 8770.82,
+          "avg": 3507.48,
+          "max": 8802.6
+        },
+        "client_latency_served_only_ms": {
+          "count": 42,
+          "p50": 6791.15,
+          "p95": 8740.75,
+          "p99": 8802.6,
+          "avg": 6684.56,
+          "max": 8802.6
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861061.9834838,
+          "overall": {
+            "count": 1826,
+            "p50": 711.66,
+            "p95": 5546.42,
+            "p99": 16082.37,
+            "avg": 1648.56,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 711.66,
+              "p95": 5546.42,
+              "p99": 16082.37,
+              "avg": 1648.56,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1511,
+              "p50": 690.58,
+              "p95": 4562.94,
+              "p99": 5569.91,
+              "avg": 1098.05,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 78,
+              "p50": 1079.26,
+              "p95": 2405.46,
+              "p99": 2490.16,
+              "avg": 1379.64,
+              "max": 2490.16
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 56,
+              "p50": 5029.21,
+              "p95": 6933.02,
+              "p99": 6936.77,
+              "avg": 3799.75,
+              "max": 6936.77
+            },
+            "": {
+              "count": 78,
+              "p50": 1079.26,
+              "p95": 2405.46,
+              "p99": 2490.16,
+              "avg": 1379.64,
+              "max": 2490.16
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 78,
+              "p50": 1079.26,
+              "p95": 2405.46,
+              "p99": 2490.16,
+              "avg": 1379.64,
+              "max": 2490.16,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 56,
+              "p50": 5029.21,
+              "p95": 6933.02,
+              "p99": 6936.77,
+              "avg": 3799.75,
+              "max": 6936.77,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 50,
+        "peak_mock_in_flight": 10,
+        "peak_mock_queue_depth": 20,
+        "scenario_server_latency_ms": {
+          "count": 42,
+          "p50": 5047.27,
+          "p95": 6933.02,
+          "p99": 6936.77,
+          "avg": 4883.28,
+          "max": 6936.77
+        },
+        "baseline": {
+          "health_rtt_ms": 8.05,
+          "concurrent_health_60_wall_ms": 592.8
+        }
+      },
+      {
+        "counters": {
+          "served": 42,
+          "rate_limit_429": 0,
+          "load_shed_429": 78,
+          "error_5xx": 0,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "429": 78,
+          "200": 42
+        },
+        "wall_seconds": 9.828,
+        "requests_per_second": 12.2,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 1462.78,
+          "p95": 7743.01,
+          "p99": 8204.1,
+          "avg": 3235.6,
+          "max": 8315.39
+        },
+        "client_latency_served_only_ms": {
+          "count": 42,
+          "p50": 6678.6,
+          "p95": 8137.71,
+          "p99": 8315.39,
+          "avg": 6668.33,
+          "max": 8315.39
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861088.380534,
+          "overall": {
+            "count": 1826,
+            "p50": 714.22,
+            "p95": 5548.06,
+            "p99": 16082.37,
+            "avg": 1631.32,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 714.22,
+              "p95": 5548.06,
+              "p99": 16082.37,
+              "avg": 1631.32,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1511,
+              "p50": 690.58,
+              "p95": 4558.1,
+              "p99": 5692.49,
+              "avg": 1089.99,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 78,
+              "p50": 1096.63,
+              "p95": 1744.09,
+              "p99": 1830.12,
+              "avg": 1132.45,
+              "max": 1830.12
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 56,
+              "p50": 4558.1,
+              "p95": 6468.12,
+              "p99": 6474.39,
+              "avg": 3582.21,
+              "max": 6474.39
+            },
+            "": {
+              "count": 78,
+              "p50": 1096.63,
+              "p95": 1744.09,
+              "p99": 1830.12,
+              "avg": 1132.45,
+              "max": 1830.12
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 78,
+              "p50": 1096.63,
+              "p95": 1744.09,
+              "p99": 1830.12,
+              "avg": 1132.45,
+              "max": 1830.12,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 56,
+              "p50": 4558.1,
+              "p95": 6468.12,
+              "p99": 6474.39,
+              "avg": 3582.21,
+              "max": 6474.39,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 41,
+        "peak_mock_in_flight": 10,
+        "peak_mock_queue_depth": 20,
+        "scenario_server_latency_ms": {
+          "count": 42,
+          "p50": 5037.17,
+          "p95": 6468.12,
+          "p99": 6474.39,
+          "avg": 4593.22,
+          "max": 6474.39
+        },
+        "baseline": {
+          "health_rtt_ms": 3.76,
+          "concurrent_health_60_wall_ms": 315.4
+        }
+      },
+      {
+        "counters": {
+          "served": 37,
+          "rate_limit_429": 0,
+          "load_shed_429": 83,
+          "error_5xx": 0,
+          "timeouts": 0,
+          "other": 0
+        },
+        "status_codes": {
+          "429": 83,
+          "200": 37
+        },
+        "wall_seconds": 8.71,
+        "requests_per_second": 13.8,
+        "client_latency_ms": {
+          "count": 120,
+          "p50": 1589.64,
+          "p95": 6496.89,
+          "p99": 7556.68,
+          "avg": 2368.99,
+          "max": 7770.67
+        },
+        "client_latency_served_only_ms": {
+          "count": 37,
+          "p50": 5647.99,
+          "p95": 7556.68,
+          "p99": 7770.67,
+          "avg": 5213.15,
+          "max": 7770.67
+        },
+        "server_latency_percentiles": {
+          "window_seconds": 3600,
+          "max_samples": 5000,
+          "sample_size": 1826,
+          "generated_at": 1793861115.7604046,
+          "overall": {
+            "count": 1826,
+            "p50": 706.74,
+            "p95": 5538.54,
+            "p99": 16082.37,
+            "avg": 1597.98,
+            "max": 18241.97
+          },
+          "by_endpoint": {
+            "/v1/chat": {
+              "count": 1826,
+              "p50": 706.74,
+              "p95": 5538.54,
+              "p99": 16082.37,
+              "avg": 1597.98,
+              "max": 18241.97
+            }
+          },
+          "by_provider": {
+            "mock": {
+              "count": 1506,
+              "p50": 689.46,
+              "p95": 4438.34,
+              "p99": 5401.79,
+              "avg": 1061.13,
+              "max": 7164.7
+            },
+            "failed": {
+              "count": 83,
+              "p50": 841.73,
+              "p95": 1540.79,
+              "p99": 1543.5,
+              "avg": 919.85,
+              "max": 1543.5
+            },
+            "openrouter": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "groq": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock2": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_model": {
+            "mock-500ms": {
+              "count": 51,
+              "p50": 2657.91,
+              "p95": 6014.42,
+              "p99": 6020.41,
+              "avg": 2974.49,
+              "max": 6020.41
+            },
+            "": {
+              "count": 83,
+              "p50": 841.73,
+              "p95": 1540.79,
+              "p99": 1543.5,
+              "avg": 919.85,
+              "max": 1543.5
+            },
+            "meta-llama/llama-3.1-8b-instruct": {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38
+            },
+            "openai/gpt-oss-120b": {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4
+            },
+            "mock-primary": {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7
+            },
+            "mock-fallback": {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97
+            }
+          },
+          "by_route": [
+            {
+              "count": 1455,
+              "p50": 684.2,
+              "p95": 3109.52,
+              "p99": 5178.14,
+              "avg": 994.06,
+              "max": 7164.7,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-primary"
+            },
+            {
+              "count": 225,
+              "p50": 5509.71,
+              "p95": 17063.94,
+              "p99": 18177.19,
+              "avg": 5476.1,
+              "max": 18241.97,
+              "endpoint": "/v1/chat",
+              "provider": "mock2",
+              "model": "mock-fallback"
+            },
+            {
+              "count": 83,
+              "p50": 841.73,
+              "p95": 1540.79,
+              "p99": 1543.5,
+              "avg": 919.85,
+              "max": 1543.5,
+              "endpoint": "/v1/chat",
+              "provider": "failed",
+              "model": ""
+            },
+            {
+              "count": 51,
+              "p50": 2657.91,
+              "p95": 6014.42,
+              "p99": 6020.41,
+              "avg": 2974.49,
+              "max": 6020.41,
+              "endpoint": "/v1/chat",
+              "provider": "mock",
+              "model": "mock-500ms"
+            },
+            {
+              "count": 9,
+              "p50": 2.0,
+              "p95": 769.4,
+              "p99": 769.4,
+              "avg": 245.67,
+              "max": 769.4,
+              "endpoint": "/v1/chat",
+              "provider": "groq",
+              "model": "openai/gpt-oss-120b"
+            },
+            {
+              "count": 3,
+              "p50": 4186.75,
+              "p95": 4502.38,
+              "p99": 4502.38,
+              "avg": 3055.95,
+              "max": 4502.38,
+              "endpoint": "/v1/chat",
+              "provider": "openrouter",
+              "model": "meta-llama/llama-3.1-8b-instruct"
+            }
+          ]
+        },
+        "peak_global_in_flight": 43,
+        "peak_mock_in_flight": 10,
+        "peak_mock_queue_depth": 20,
+        "scenario_server_latency_ms": {
+          "count": 37,
+          "p50": 4401.38,
+          "p95": 6017.36,
+          "p99": 6020.41,
+          "avg": 3892.17,
+          "max": 6020.41
+        },
+        "baseline": {
+          "health_rtt_ms": 3.49,
+          "concurrent_health_60_wall_ms": 273.0
+        }
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "runs": 3,
+      "served": 49,
+      "rate_limit_429": 0,
+      "load_shed_429": 0,
+      "error_5xx": 71,
+      "timeouts": 0,
+      "wall_seconds": 11.24,
+      "requests_per_second": 10.7,
+      "client_latency_ms": {
+        "p50": 4004.25,
+        "p95": 6008.41,
+        "p99": 7428.71
+      },
+      "client_latency_served_only_ms": {
+        "p50": 3997.44,
+        "p95": 7071.69,
+        "p99": 7444.04
+      },
+      "scenario_server_latency_ms": {
+        "p50": 3287.24,
+        "p95": 6070.41,
+        "p99": 6374.26
+      },
+      "peak_global_in_flight": 0,
+      "peak_mock_in_flight": 0,
+      "peak_mock_queue_depth": 0,
+      "served_rate": 0.41,
+      "error_rate": 0.59,
+      "shed_rate": 0.0
+    },
+    "after": {
+      "runs": 3,
+      "served": 42,
+      "rate_limit_429": 0,
+      "load_shed_429": 78,
+      "error_5xx": 0,
+      "timeouts": 0,
+      "wall_seconds": 9.83,
+      "requests_per_second": 12.2,
+      "client_latency_ms": {
+        "p50": 1589.64,
+        "p95": 7743.01,
+        "p99": 8204.1
+      },
+      "client_latency_served_only_ms": {
+        "p50": 6678.6,
+        "p95": 8137.71,
+        "p99": 8315.39
+      },
+      "scenario_server_latency_ms": {
+        "p50": 5037.17,
+        "p95": 6468.12,
+        "p99": 6474.39
+      },
+      "peak_global_in_flight": 50,
+      "peak_mock_in_flight": 10,
+      "peak_mock_queue_depth": 20,
+      "served_rate": 0.35,
+      "error_rate": 0.0,
+      "shed_rate": 0.65
+    }
+  },
+  "baseline": {
+    "health_rtt_ms": 9.31,
+    "concurrent_health_60_wall_ms": 668.7
+  }
+}

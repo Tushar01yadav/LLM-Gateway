@@ -1,0 +1,276 @@
+{
+  "generated_at": "2026-11-05T10:35:29.007384+00:00",
+  "environment": {
+    "redis_db": 14,
+    "workers": 2,
+    "platform": "win32",
+    "python": "3.10.11"
+  },
+  "summary": {
+    "kill_recovery_seconds": 24.69,
+    "default_lease_seconds": 15.0,
+    "default_heartbeat_seconds": 5.0,
+    "slow_alive_override": {
+      "lease_seconds": 6,
+      "heartbeat_seconds": 2
+    }
+  },
+  "checks": [
+    {
+      "check": "two workers started",
+      "ok": true,
+      "evidence": {
+        "pids": [
+          18072,
+          30620
+        ],
+        "redis_db": 14
+      }
+    },
+    {
+      "check": "default lease/heartbeat are 15s/5s",
+      "ok": true,
+      "evidence": {
+        "lease_seconds": 15.0,
+        "heartbeat_seconds": 5.0
+      }
+    },
+    {
+      "check": "job picked up and leased",
+      "ok": true,
+      "evidence": {
+        "job_id": "job_09489a5415db",
+        "lease": "{\"owner\": \"COGLAP021:30620:f763df2f\", \"expires\": 1793874851.193843}"
+      }
+    },
+    {
+      "check": "lease owner is one of the two workers",
+      "ok": true,
+      "evidence": {
+        "victim_pid": 30620,
+        "workers": [
+          18072,
+          30620
+        ]
+      }
+    },
+    {
+      "check": "victim worker hard-killed (no shutdown hooks)",
+      "ok": true,
+      "evidence": {
+        "pid": 30620,
+        "process": "python3.10.exe",
+        "kill": "TerminateProcess"
+      }
+    },
+    {
+      "check": "survivor still alive",
+      "ok": true,
+      "evidence": {
+        "pid": 18072
+      }
+    },
+    {
+      "check": "job remains in processing after kill (no loss)",
+      "ok": true,
+      "evidence": {
+        "lease": "{\"owner\": \"COGLAP021:30620:f763df2f\", \"expires\": 1793874851.193843}",
+        "processing": [
+          "job_09489a5415db"
+        ]
+      }
+    },
+    {
+      "check": "job completed after lease expiry recovery",
+      "ok": true,
+      "evidence": {
+        "status": "done",
+        "attempts": 2,
+        "error": null,
+        "recovery_seconds": 24.69
+      }
+    },
+    {
+      "check": "retry happened exactly once (attempts==2)",
+      "ok": true,
+      "evidence": {
+        "attempts": 2
+      }
+    },
+    {
+      "check": "result present",
+      "ok": true,
+      "evidence": {
+        "result_text": "Mock response for stress testing"
+      }
+    },
+    {
+      "check": "exactly one cost row written",
+      "ok": true,
+      "evidence": {
+        "before": 0,
+        "after": 1
+      }
+    },
+    {
+      "check": "Redis cost counter incremented once",
+      "ok": true,
+      "evidence": {
+        "delta": 6.5e-07,
+        "job_cost": 6.5e-07
+      }
+    },
+    {
+      "check": "no leftover queue/lease/delayed/DLQ state",
+      "ok": true,
+      "evidence": {
+        "processing": [],
+        "lease": null,
+        "delayed": null,
+        "dlq": null
+      }
+    },
+    {
+      "check": "heartbeat job leased",
+      "ok": true,
+      "evidence": {
+        "job_id": "job_fe83952b5ec4",
+        "lease": "{\"owner\": \"COGLAP021:18072:2d6d550f\", \"expires\": 1793874877.581784}"
+      }
+    },
+    {
+      "check": "heartbeat extended lease beyond first expiry",
+      "ok": true,
+      "evidence": {
+        "first_expires_in_s": 3.2,
+        "second_expires_in_s": 13.3
+      }
+    },
+    {
+      "check": "long job completed without spurious retry",
+      "ok": true,
+      "evidence": {
+        "status": "done",
+        "attempts": 1
+      }
+    },
+    {
+      "check": "job reaches DLQ after max attempts",
+      "ok": true,
+      "evidence": {
+        "status": "dlq",
+        "attempts": 3,
+        "error": "All LLM providers failed. Summary: mock (attempt 1): server_error_503; mock (attempt 2): server_error_503"
+      }
+    },
+    {
+      "check": "replay accepted",
+      "ok": true,
+      "evidence": {
+        "id": "job_3ef4bb00bf76",
+        "status": "queued",
+        "replayed": true
+      }
+    },
+    {
+      "check": "replay reset the attempt budget before re-processing",
+      "ok": true,
+      "evidence": {
+        "status": "dlq",
+        "attempts": 3
+      }
+    },
+    {
+      "check": "replayed job completes after provider heals",
+      "ok": true,
+      "evidence": {
+        "status": "done",
+        "attempts": 1
+      }
+    },
+    {
+      "check": "cost charged once for replayed job",
+      "ok": true,
+      "evidence": {
+        "before": 0,
+        "after": 1
+      }
+    },
+    {
+      "check": "guardrail-blocked job goes to DLQ",
+      "ok": true,
+      "evidence": {
+        "status": "dlq",
+        "error": "guardrail: Security guardrail blocked request: Prompt injection pattern detected ('ignore all previous instructions') (OWASP LLM01)."
+      }
+    },
+    {
+      "check": "clear_dlq reports deleted rows",
+      "ok": true,
+      "evidence": {
+        "status": "ok",
+        "cleared": 5
+      }
+    },
+    {
+      "check": "DLQ empty in DB and Redis after clear (await bug fixed)",
+      "ok": true,
+      "evidence": {
+        "db_dlq_rows": 0,
+        "redis_dlq": {}
+      }
+    },
+    {
+      "check": "job leased under the 6s override",
+      "ok": true,
+      "evidence": {
+        "lease": "{\"owner\": \"COGLAP021:27292:291d74c5\", \"expires\": 1793874921.6966715}"
+      }
+    },
+    {
+      "check": "slow-but-alive job keeps its lease past the original 6s expiry",
+      "ok": true,
+      "evidence": {
+        "first_expires_in_s": -3.0,
+        "renewed_expires_in_s": 5.2,
+        "worker_alive": true
+      }
+    },
+    {
+      "check": "lease was renewed (not merely unexpired)",
+      "ok": true,
+      "evidence": {
+        "first_expiry": 1793874921.6966715,
+        "renewed_expiry": 1793874929.886
+      }
+    },
+    {
+      "check": "slow-but-alive job completes exactly once (attempts==1)",
+      "ok": true,
+      "evidence": {
+        "status": "done",
+        "attempts": 1
+      }
+    },
+    {
+      "check": "slow-but-alive job charged once",
+      "ok": true,
+      "evidence": {
+        "before": 0,
+        "after": 1
+      }
+    },
+    {
+      "check": "no duplicate delivery state after slow-but-alive job",
+      "ok": true,
+      "evidence": {
+        "processing": [],
+        "lease": null,
+        "delayed": null,
+        "dlq": null
+      }
+    }
+  ],
+  "passed": 30,
+  "total": 30
+}

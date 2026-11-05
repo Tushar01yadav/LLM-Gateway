@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: node --check dashboard JavaScript
+        env:
+          GATEWAY_ADMIN_TOKEN: ci-dashboard-js-check
+        run: |
+          python - <<'PY'
+          import re
+          import shutil
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          from app.main import HTML_CONTENT
+
+          node = shutil.which("node")
+          assert node, "node is required for the dashboard JS syntax check"
+          scripts = [
+              s for s in re.findall(
+                  r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+                  HTML_CONTENT,
+                  re.IGNORECASE | re.DOTALL,
+              )
+              if s.strip()
+          ]
+          assert scripts, "dashboard HTML should contain inline scripts"
+          with tempfile.TemporaryDirectory() as tmp:
+              for index, source in enumerate(scripts):
+                  path = Path(tmp) / f"dashboard_{index}.js"
+                  path.write_text(source, encoding="utf-8")
+                  subprocess.run([node, "--check", str(path)], check=True)
+          print(f"node --check passed for {len(scripts)} inline script block(s)")
+          PY
+
+      - name: Run test suite
+        env:
+          REDIS_URL: redis://127.0.0.1:6379/15
+        run: pytest -q

@@ -97,6 +97,20 @@ def test_fallback_chains_registry():
     assert gemini_model_chain[1]["provider"] == "groq"
 
 
+def test_mock_failover_lane_and_bulkhead():
+    """Chaos fallback uses mock -> mock2; the fallback provider needs its own pool."""
+    from app.reliability import ADAPTER_MAP, PROVIDER_POOLS
+
+    chain = resolve_fallback_chain("mock_failover")
+    assert chain == [
+        {"provider": "mock", "model": "mock-primary"},
+        {"provider": "mock2", "model": "mock-fallback"},
+    ]
+    assert "mock2" in ADAPTER_MAP
+    assert "mock2" in PROVIDER_POOLS
+    assert PROVIDER_POOLS["mock2"].max_inflight == 20
+
+
 # ---------------------------------------------------------------------------
 # 3. Test Circuit Breaker Logic
 # ---------------------------------------------------------------------------
@@ -154,6 +168,7 @@ async def test_circuit_breaker_transitions():
 # 4. Test Live Reliable Execution
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("GROQ_API_KEY"), reason="live test: requires a real GROQ_API_KEY")
 async def test_live_reliable_execution():
     # Test primary success without fallback
     res = await execute_reliable_completion(
@@ -172,6 +187,10 @@ async def test_live_reliable_execution():
 # 5. Test Live Fallback Chain Triggering
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not (os.getenv("OPENROUTER_API_KEY") or os.getenv("GEMINI_API_KEY")),
+    reason="live test: needs a real fallback provider key (OPENROUTER_API_KEY or GEMINI_API_KEY)",
+)
 async def test_live_fallback_trigger():
     # Force primary Groq circuit breaker to OPEN to trigger fallback
     groq_cb = CIRCUIT_BREAKERS["groq"]
