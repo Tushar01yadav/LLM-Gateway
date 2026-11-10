@@ -409,6 +409,8 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
         if not DATABASE_URL:
             cursor.execute("BEGIN IMMEDIATE")
         now = _database_epoch(cursor)
+        stored_budget = budget_value if DATABASE_URL else float(daily_budget)
+        stored_amount = amount_value if DATABASE_URL else float(amount)
         day_start = datetime.fromtimestamp(now, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         day = day_start.strftime("%Y-%m-%d")
         start = day_start.timestamp()
@@ -427,7 +429,7 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
         existing_spend = float(cursor.fetchone()[0] or 0.0)
         cursor.execute(
             "INSERT INTO budget_accounts (key_id,budget_date,daily_budget,spent,reserved) VALUES (?,?,?,?,0) ON CONFLICT(key_id) DO NOTHING",
-            (str(key_id), day, budget_value, str(Decimal(str(existing_spend)))),
+            (str(key_id), day, stored_budget, str(Decimal(str(existing_spend))) if DATABASE_URL else existing_spend),
         )
         cursor.execute(
             """UPDATE budget_accounts SET daily_budget = ?, budget_date = ?,
@@ -436,8 +438,10 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
                WHERE key_id = ? AND
                    (CASE WHEN budget_date = ? THEN spent + reserved ELSE ? END) + ? <= ?
                RETURNING spent, reserved""",
-            (budget_value, day, day, str(Decimal(str(existing_spend))), day, amount_value, amount_value,
-             str(key_id), day, str(Decimal(str(existing_spend))), amount_value, budget_value),
+            (stored_budget, day, day, str(Decimal(str(existing_spend))) if DATABASE_URL else existing_spend,
+             day, stored_amount, stored_amount, str(key_id), day,
+             str(Decimal(str(existing_spend))) if DATABASE_URL else existing_spend,
+             stored_amount, stored_budget),
         )
         row = cursor.fetchone()
         if row is None:
@@ -448,7 +452,7 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
             return False, float(current[0] + current[1]) if current else existing_spend
         cursor.execute(
             "INSERT INTO budget_reservations (id,key_id,key_name,budget_date,amount,status,expires_at,created_at) VALUES (?,?,?,?,?,'active',?,?)",
-            (reservation_id, str(key_id), key_name, day, amount_value, now + lease_seconds, now),
+            (reservation_id, str(key_id), key_name, day, stored_amount, now + lease_seconds, now),
         )
         conn.commit()
         BUDGET_RESERVATIONS.labels("reserved").inc()

@@ -118,7 +118,7 @@ jobs:
           GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway@127.0.0.1:5432/gateway_test
           GATEWAY_REQUIRE_POSTGRES_TESTS: "1"
           GATEWAY_ADMIN_TOKEN: ci-postgres-tests
-          REDIS_URL: ""
+          REDIS_URL: redis://127.0.0.1:6379/15
           CIRCUIT_BREAKER_REDIS_URL: ""
           GATEWAY_TEST_DISABLE_REDIS: "1"
         run: python -m pytest tests/test_budget_reservations.py tests/test_jobs_crash_safety.py -q

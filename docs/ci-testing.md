@@ -63,7 +63,7 @@ With the test-only admin token set, run the full suite against SQLite with Redis
 ```powershell
 $env:GATEWAY_ADMIN_TOKEN = 'local-test-only'
 $env:DATABASE_URL = ''
-$env:REDIS_URL = ''
+$env:REDIS_URL = 'redis://127.0.0.1:6379/15'
 $env:CIRCUIT_BREAKER_REDIS_URL = ''
 $env:GATEWAY_TEST_DISABLE_REDIS = '1'
 $env:GATEWAY_STARTUP_PROVIDER_SMOKE_TEST = 'false'
