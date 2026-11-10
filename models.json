@@ -1,4 +1,11 @@
 {
+  "circuit_breakers": {
+    "failure_threshold": 5,
+    "recovery_timeout_seconds": 60,
+    "probe_lease_seconds": 30,
+    "count_429": true,
+    "providers": {}
+  },
   "guardrails": {
     "enabled": true,
     "block_on_pii": false,

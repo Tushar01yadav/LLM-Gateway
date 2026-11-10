@@ -115,8 +115,10 @@ def test_mock_failover_lane_and_bulkhead():
 # 3. Test Circuit Breaker Logic
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_circuit_breaker_transitions():
-    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=2.0)
+async def test_circuit_breaker_transitions(monkeypatch):
+    current_time = [100.0]
+    monkeypatch.setattr("app.reliability.time.time", lambda: current_time[0])
+    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=60.0, redis_url="")
     assert cb.state == "CLOSED"
 
     # 4 failures should remain CLOSED
@@ -134,10 +136,11 @@ async def test_circuit_breaker_transitions():
     assert can_exec is False
     assert "circuit_open" in reason
 
-    # Wait for cooldown (2 seconds)
-    await asyncio.sleep(2.1)
-
-    # After cooldown, transitions to HALF_OPEN (probe allowed)
+    current_time[0] = 120.0
+    # Recovery stays closed until the controlled clock crosses the timeout.
+    can_exec, reason = await cb.can_execute()
+    assert can_exec is False
+    current_time[0] = 160.0
     can_exec, reason = await cb.can_execute()
     assert can_exec is True
     assert cb.state == "HALF_OPEN"
@@ -148,12 +151,13 @@ async def test_circuit_breaker_transitions():
     assert cb.state == "CLOSED"
     assert cb.consecutive_failures == 0
 
+    current_time[0] = 200.0
     # Test failure during HALF_OPEN trips immediately back to OPEN
     for _ in range(5):
         await cb.record_failure()
     assert cb.state == "OPEN"
 
-    await asyncio.sleep(2.1)
+    current_time[0] = 260.0
     await cb.can_execute() # Transitions to HALF_OPEN
     assert cb.state == "HALF_OPEN"
 

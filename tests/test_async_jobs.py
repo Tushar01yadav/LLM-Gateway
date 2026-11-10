@@ -16,7 +16,8 @@ init_jobs_db()
 
 
 @pytest.fixture(autouse=True)
-async def ensure_clean_jobs():
+def ensure_clean_jobs(monkeypatch):
+    monkeypatch.setattr(JOB_MANAGER, "get_client", lambda: None)
     for prov in INJECTED_FAILURES:
         set_failure_injection(prov, enabled=False)
     yield
@@ -89,6 +90,12 @@ async def test_job_retries_then_dlq():
     j1 = await JOB_MANAGER.get_job(job_id)
     assert j1["status"] == "queued"
     assert j1["attempts"] == 1
+    import sqlite3
+    from app.jobs import DB_PATH
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE async_jobs SET available_at = 0 WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
 
     # Process second attempt (fails -> reached max_attempts 2 -> lands in DLQ)
     await JOB_MANAGER._process_job(job_id)
@@ -170,13 +177,20 @@ async def test_worker_crash_recovery():
     stale_time = time.time() - 60.0
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("UPDATE async_jobs SET status = 'running', updated_at = ? WHERE id = ?", (stale_time, job_id))
+    c.execute(
+        "UPDATE async_jobs SET status = 'running', attempts = 1, attempt_count = 1, lease_owner = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?",
+        ("crashed-worker", stale_time, stale_time, job_id),
+    )
     conn.commit()
     conn.close()
 
     # Trigger crash recovery
     await JOB_MANAGER.recover_stale_jobs()
 
-    # Verify job was rescued and returned to queued state
+    # Recovery clears the expired lease before a worker wins a fresh claim.
     recovered_job = await JOB_MANAGER.get_job(job_id)
     assert recovered_job["status"] == "queued"
+    from app.jobs import _claim_job_sync
+    claimed = _claim_job_sync(job_id, "recovery-worker", 30)
+    assert claimed is not None
+    assert claimed["attempts"] == 2

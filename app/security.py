@@ -6,15 +6,17 @@ import logging
 import math
 import os
 import secrets
-import sqlite3
+from app.db import sqlite3
 import sys
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
 from fastapi import HTTPException, Header, Request, status
+from prometheus_client import Counter
 
 load_dotenv()
 
@@ -26,6 +28,8 @@ if not logger.handlers:
         logging.Formatter("[%(asctime)s] [%(levelname)s] [SECURITY] %(message)s", datefmt="%H:%M:%S")
     )
     logger.addHandler(ch)
+RATE_LIMIT_RESULTS = Counter("gateway_rate_limit_checks_total", "API rate-limit decisions", ("outcome", "coordination"))
+RATE_LIMIT_REDIS_FAILURES = Counter("gateway_rate_limit_redis_failures_total", "Rate limiter Redis failures")
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway.db")
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models.json")
@@ -179,7 +183,7 @@ def init_security_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_gw_key_hash ON gateway_api_keys(key_hash);")
     try:
-        cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN daily_budget REAL DEFAULT 5.0")
+        cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN IF NOT EXISTS daily_budget REAL DEFAULT 5.0")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -206,10 +210,10 @@ def create_gateway_api_key(name: str, quota: int = 60, daily_budget: float = 5.0
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO gateway_api_keys (name, key_hash, prefix, status, quota, daily_budget) VALUES (?, ?, ?, 'active', ?, ?)",
+        "INSERT INTO gateway_api_keys (name, key_hash, prefix, status, quota, daily_budget) VALUES (?, ?, ?, 'active', ?, ?) RETURNING id",
         (name.strip() or "Default Key", key_hash, prefix, quota, daily_budget),
     )
-    key_id = cursor.lastrowid
+    key_id = cursor.fetchone()[0]
     conn.commit()
 
     cursor.execute("SELECT id, name, prefix, status, quota, daily_budget, created_at FROM gateway_api_keys WHERE id = ?", (key_id,))
@@ -345,7 +349,9 @@ class RedisTokenBucketRateLimiter:
         self._redis_client: Optional[aioredis.Redis] = None
         self._lock = asyncio.Lock()
         self._mem_lock = threading.Lock()
-        self._mem_buckets: Dict[str, Dict[str, float]] = {}
+        self._mem_buckets: OrderedDict[str, Dict[str, float]] = OrderedDict()
+        self._mem_max_buckets = 10000
+        self._mem_bucket_ttl_seconds = 3600.0
         self._last_redis_fail: float = 0.0
 
     async def get_client(self) -> Optional[aioredis.Redis]:
@@ -380,6 +386,7 @@ class RedisTokenBucketRateLimiter:
         """
         cfg = get_security_config()
         if not cfg.get("enabled", True):
+            RATE_LIMIT_RESULTS.labels("allowed", "disabled").inc()
             return True, 0, quota_rpm
 
         fail_closed = rate_limit_fail_closed()
@@ -392,7 +399,18 @@ class RedisTokenBucketRateLimiter:
         def _mem_check() -> Tuple[bool, int, float]:
             with self._mem_lock:
                 b = self._mem_buckets.get(bucket)
+                if b is not None and now - b["last_time"] >= self._mem_bucket_ttl_seconds:
+                    self._mem_buckets.pop(bucket, None)
+                    b = None
                 if b is None:
+                    while self._mem_buckets:
+                        oldest_bucket = next(iter(self._mem_buckets))
+                        oldest = self._mem_buckets[oldest_bucket]
+                        if now - oldest["last_time"] < self._mem_bucket_ttl_seconds:
+                            break
+                        self._mem_buckets.popitem(last=False)
+                    if len(self._mem_buckets) >= self._mem_max_buckets:
+                        self._mem_buckets.popitem(last=False)
                     tokens = capacity
                     last = now
                 else:
@@ -401,9 +419,11 @@ class RedisTokenBucketRateLimiter:
                 if tokens >= cost:
                     tokens -= cost
                     self._mem_buckets[bucket] = {"tokens": tokens, "last_time": last}
+                    self._mem_buckets.move_to_end(bucket)
                     return True, 0, round(tokens, 2)
                 needed = cost - tokens
                 self._mem_buckets[bucket] = {"tokens": tokens, "last_time": last}
+                self._mem_buckets.move_to_end(bucket)
                 return False, max(1, math.ceil(needed / refill_rate)), round(tokens, 2)
 
         client = await self.get_client()
@@ -412,8 +432,11 @@ class RedisTokenBucketRateLimiter:
                 f"[SECURITY] 🚨 REDIS CONNECTION DOWN! Falling back safely with fail_closed={fail_closed}."
             )
             if fail_closed:
+                RATE_LIMIT_RESULTS.labels("rejected", "fail_closed").inc()
                 return False, 5, 0.0
-            return _mem_check()
+            result = _mem_check()
+            RATE_LIMIT_RESULTS.labels("allowed" if result[0] else "rejected", "local_degraded").inc()
+            return result
 
         token_key = f"gw:rate:{bucket}:tokens"
         time_key = f"gw:rate:{bucket}:last_time"
@@ -432,16 +455,21 @@ class RedisTokenBucketRateLimiter:
             allowed = int(result[0]) == 1
             retry_after = int(result[1])
             remaining = round(float(result[2]), 2)
+            RATE_LIMIT_RESULTS.labels("allowed" if allowed else "rejected", "redis").inc()
             return allowed, retry_after, remaining
         except Exception as exc:
             self._last_redis_fail = time.time()
+            RATE_LIMIT_REDIS_FAILURES.inc()
             logger.error(
                 f"[SECURITY] 🚨 REDIS ERROR during token bucket check: {exc}. "
                 f"Falling back safely (fail_closed={fail_closed})."
             )
             if fail_closed:
+                RATE_LIMIT_RESULTS.labels("rejected", "fail_closed").inc()
                 return False, 5, 0.0
-            return _mem_check()
+            result = _mem_check()
+            RATE_LIMIT_RESULTS.labels("allowed" if result[0] else "rejected", "local_degraded").inc()
+            return result
 
     async def close(self):
         async with self._lock:

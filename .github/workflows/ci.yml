@@ -18,8 +18,23 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: gateway_test
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -27,10 +42,27 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.txt
 
-      - name: node --check dashboard JavaScript
+      - name: Stage A - static validation
+        if: ${{ always() && !cancelled() }}
         env:
+          DATABASE_URL: ""
+          GATEWAY_ADMIN_TOKEN: ci-static-validation
+        run: |
+          python -m pip check
+          python -m compileall -q app tests
+          python -c "import app.main, app.jobs, app.tracing"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git diff --check "origin/${GITHUB_BASE_REF}...HEAD"
+          else
+            git diff --check HEAD^ HEAD
+          fi
+
+      - name: Stage A - dashboard JavaScript syntax
+        if: ${{ always() && !cancelled() }}
+        env:
+          DATABASE_URL: ""
           GATEWAY_ADMIN_TOKEN: ci-dashboard-js-check
         run: |
           python - <<'PY'
@@ -61,7 +93,47 @@ jobs:
           print(f"node --check passed for {len(scripts)} inline script block(s)")
           PY
 
-      - name: Run test suite
+      - name: Stage B - focused SQLite tests
+        if: ${{ always() && !cancelled() }}
         env:
+          DATABASE_URL: ""
+          GATEWAY_TEST_DATABASE_URL: ""
+          GATEWAY_ADMIN_TOKEN: ci-sqlite-tests
+        run: pytest tests/test_budget_reservations.py tests/test_tracing.py tests/test_local_fallback_bounds.py tests/test_cost_cache.py -q
+
+      - name: Stage C - initialize isolated PostgreSQL schema
+        if: ${{ always() && !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://gateway:gateway@127.0.0.1:5432/gateway_test
+          GATEWAY_ADMIN_TOKEN: ci-postgres-schema
+        run: python -c "from app.security import init_security_db; init_security_db()"
+
+      - name: Stage C - PostgreSQL integration tests
+        if: ${{ always() && !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://gateway:gateway@127.0.0.1:5432/gateway_test
+          GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway@127.0.0.1:5432/gateway_test
+          GATEWAY_REQUIRE_POSTGRES_TESTS: "1"
+          GATEWAY_ADMIN_TOKEN: ci-postgres-tests
           REDIS_URL: redis://127.0.0.1:6379/15
+        run: pytest tests/test_budget_reservations.py tests/test_jobs_crash_safety.py -q
+
+      - name: Stage D - Redis integration tests
+        if: ${{ always() && !cancelled() }}
+        env:
+          DATABASE_URL: ""
+          GATEWAY_ADMIN_TOKEN: ci-redis-tests
+          GATEWAY_REQUIRE_REDIS_TESTS: "1"
+          REDIS_URL: redis://127.0.0.1:6379/15
+          CIRCUIT_TEST_REDIS_URL: redis://127.0.0.1:6379/14
+          CIRCUIT_BREAKER_REDIS_URL: redis://127.0.0.1:6379/14
+        run: pytest tests/test_circuit_breakers.py tests/test_jobs_crash_safety.py -q
+
+      - name: Stage E - full regression suite
+        if: ${{ always() && !cancelled() }}
+        env:
+          DATABASE_URL: ""
+          GATEWAY_ADMIN_TOKEN: ci-full-regression
+          REDIS_URL: redis://127.0.0.1:6379/15
+          CIRCUIT_BREAKER_REDIS_URL: redis://127.0.0.1:6379/14
         run: pytest -q

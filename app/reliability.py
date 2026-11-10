@@ -5,6 +5,8 @@ import logging
 import os
 import random
 import time
+import uuid
+import hashlib
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,6 +52,54 @@ if not logger.handlers:
     )
     logger.addHandler(ch)
 
+try:
+    from redis.asyncio import Redis
+    from redis.exceptions import RedisError
+except ImportError:
+    Redis = None
+    RedisError = Exception
+
+try:
+    from prometheus_client import Counter, Gauge, Histogram
+    CIRCUIT_TRANSITIONS = Counter("gateway_circuit_transitions_total", "Circuit state transitions", ("provider", "model", "previous", "current", "reason"))
+    CIRCUIT_PROBES = Counter("gateway_circuit_probes_total", "Circuit probe outcomes", ("provider", "model", "outcome"))
+    CIRCUIT_REJECTIONS = Counter("gateway_circuit_rejections_total", "Requests rejected by circuit breakers", ("provider", "model", "state"))
+    CIRCUIT_REDIS_FAILURES = Counter("gateway_circuit_redis_coordination_failures_total", "Redis coordination failures")
+    CIRCUIT_DEGRADED = Gauge("gateway_circuit_coordination_degraded", "Circuit coordination uses process-local degraded mode", ("provider", "model"))
+    CIRCUIT_STATE = Gauge("gateway_circuit_state", "Circuit state (one-hot by state)", ("provider", "model", "state"))
+    CIRCUIT_FAILURES = Counter("gateway_circuit_failures_total", "Provider failures classified for circuit policy", ("provider", "model", "classification"))
+    CIRCUIT_LEASE_EXPIRATIONS = Counter("gateway_circuit_probe_lease_expirations_total", "Expired probe leases reclaimed", ("provider", "model"))
+    CIRCUIT_RECOVERY = Histogram("gateway_circuit_recovery_seconds", "Seconds from circuit opening to successful probe", ("provider", "model"))
+except ImportError:
+    CIRCUIT_TRANSITIONS = CIRCUIT_PROBES = CIRCUIT_REJECTIONS = CIRCUIT_REDIS_FAILURES = CIRCUIT_DEGRADED = CIRCUIT_STATE = CIRCUIT_FAILURES = CIRCUIT_LEASE_EXPIRATIONS = CIRCUIT_RECOVERY = None
+
+_CB_ACQUIRE_LUA = r"""
+local k=KEYS[1]; local threshold=tonumber(ARGV[1]); local cooldown=tonumber(ARGV[2]); local lease=tonumber(ARGV[3]); local token=ARGV[4]
+local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
+if redis.call('EXISTS',k)==0 then redis.call('HSET',k,'state','CLOSED','failures',0,'version',0,'threshold',threshold,'cooldown_ms',cooldown,'total_requests',0,'total_failures',0,'total_successes',0,'transition_at_ms',now); redis.call('PEXPIRE',k,math.max(cooldown*20,86400000)) end
+local state=redis.call('HGET',k,'state'); local version=tonumber(redis.call('HGET',k,'version') or '0'); redis.call('HINCRBY',k,'total_requests',1); redis.call('PEXPIRE',k,math.max(cooldown*20,86400000))
+if state=='CLOSED' then return {1,'closed_healthy',version,'',state,'CLOSED',0,'',0,now} end
+if state=='OPEN' then local until_ms=tonumber(redis.call('HGET',k,'open_until_ms') or '0'); if now<until_ms then return {0,'circuit_open_'..math.ceil((until_ms-now)/1000)..'s_remaining',version,'',state,'OPEN',until_ms,'',0,now} end; version=redis.call('HINCRBY',k,'version',1); redis.call('HSET',k,'state','HALF_OPEN','transition_at_ms',now,'probe_owner',token,'probe_expires_at_ms',now+lease); return {1,'half_open_probe',version,token,'HALF_OPEN','OPEN',0,token,now+lease,now} end
+local owner=redis.call('HGET',k,'probe_owner'); local expires=tonumber(redis.call('HGET',k,'probe_expires_at_ms') or '0'); if not owner or now>=expires then local reason='half_open_probe'; if owner then redis.call('HINCRBY',k,'expired_probe_leases',1); reason='half_open_probe_lease_reclaimed' end; version=redis.call('HINCRBY',k,'version',1); redis.call('HSET',k,'probe_owner',token,'probe_expires_at_ms',now+lease); return {1,reason,version,token,state,state,0,token,now+lease,now} end
+return {0,'half_open_probe_in_progress',version,'',state,state,0,owner,expires,now}
+"""
+
+_CB_COMPLETE_LUA = r"""
+local k=KEYS[1]; local version=tonumber(ARGV[1]); local token=ARGV[2]; local outcome=ARGV[3]; local threshold=tonumber(ARGV[4]); local cooldown=tonumber(ARGV[5])
+local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000); local state=redis.call('HGET',k,'state'); local current=tonumber(redis.call('HGET',k,'version') or '-1'); local opened=redis.call('HGET',k,'opened_at_ms') or '0'
+if not state or version~=current then return {0,state or 'MISSING',current,current,opened,now} end
+redis.call('PEXPIRE',k,math.max(cooldown*20,86400000))
+if state=='HALF_OPEN' then if token=='' or redis.call('HGET',k,'probe_owner')~=token or tonumber(redis.call('HGET',k,'probe_expires_at_ms') or '0')<=now then return {0,state,current,current,opened,now} end; if outcome=='success' then redis.call('HSET',k,'state','CLOSED','failures',0,'last_success_at_ms',now,'transition_at_ms',now); redis.call('HINCRBY',k,'total_successes',1) elseif outcome=='failure' then redis.call('HSET',k,'state','OPEN','open_until_ms',now+cooldown,'opened_at_ms',now,'transition_at_ms',now,'failures',threshold); redis.call('HINCRBY',k,'total_failures',1) end; redis.call('HDEL',k,'probe_owner','probe_expires_at_ms'); local v=redis.call('HINCRBY',k,'version',1); return {1,'HALF_OPEN',redis.call('HGET',k,'state'),v,opened,now} end
+if state~='CLOSED' then return {0,state,current,current,opened,now} end
+if outcome=='success' then redis.call('HSET',k,'failures',0,'last_success_at_ms',now); redis.call('HINCRBY',k,'total_successes',1) elseif outcome=='failure' then local failures=redis.call('HINCRBY',k,'failures',1); redis.call('HINCRBY',k,'total_failures',1); redis.call('HSET',k,'last_failure_at_ms',now); if failures>=threshold then redis.call('HSET',k,'state','OPEN','opened_at_ms',now,'open_until_ms',now+cooldown,'transition_at_ms',now); local v=redis.call('HINCRBY',k,'version',1); return {1,'CLOSED','OPEN',v,opened,now} end end
+return {1,state,state,current,opened,now}
+"""
+
+
+def _set_circuit_state(provider: str, model: str, state: str) -> None:
+    if CIRCUIT_STATE:
+        for candidate in ("CLOSED", "OPEN", "HALF_OPEN"):
+            CIRCUIT_STATE.labels(provider, model, candidate).set(1 if candidate == state else 0)
 
 # ---------------------------------------------------------------------------
 # 1. Error Classification
@@ -89,6 +139,15 @@ def classify_error(status_code: Optional[int], exc: Optional[Exception] = None) 
     return False, "unknown_error"
 
 
+def should_count_circuit_failure(status_code: Optional[int], is_retryable: bool, provider: str,
+                                 config: Optional[Dict[str, Any]] = None) -> bool:
+    if not is_retryable:
+        return False
+    breaker_config = (config or load_models_config()).get("circuit_breakers", {})
+    provider_config = breaker_config.get("providers", {}).get(provider.lower(), {})
+    return status_code != 429 or bool(provider_config.get("count_429", breaker_config.get("count_429", True)))
+
+
 # ---------------------------------------------------------------------------
 # 2. Circuit Breaker
 # ---------------------------------------------------------------------------
@@ -107,10 +166,27 @@ class CircuitBreaker:
         name: str,
         failure_threshold: int = 5,
         cooldown_seconds: float = 60.0,
+        *,
+        redis_url: Optional[str] = None,
+        model: str = "",
+        probe_lease_seconds: float = 30.0,
     ):
         self.name = name
+        self.model = model
+        self.redis_url = redis_url if redis_url is not None else os.getenv(
+            "CIRCUIT_BREAKER_REDIS_URL", os.getenv("REDIS_URL")
+        )
+        domain = f"{name}:{model}" if model else name
+        self.key = "llm-gateway:circuit:" + hashlib.sha256(domain.encode()).hexdigest()
+        self._redis = None
+        self._version = 0
+        self._permit = None
+        self._probe_owner = ""
+        self._probe_expires_at = 0.0
+        self._degraded = False
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
+        self.probe_lease_seconds = probe_lease_seconds
         self.state = "CLOSED"  # "CLOSED", "OPEN", "HALF_OPEN"
         self.consecutive_failures = 0
         self.last_failure_time = 0.0
@@ -119,51 +195,143 @@ class CircuitBreaker:
         self.total_successes = 0
         self._lock = asyncio.Lock()
 
-    async def can_execute(self) -> Tuple[bool, str]:
+    async def acquire_permit(self) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         Check if request is allowed through circuit breaker.
         Returns (can_execute: bool, reason: str).
         """
         async with self._lock:
+            if self.redis_url and Redis:
+                token = uuid.uuid4().hex
+                try:
+                    if self._redis is None:
+                        self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                    result = await self._redis.eval(_CB_ACQUIRE_LUA, 1, self.key, self.failure_threshold,
+                        int(self.cooldown_seconds * 1000), int(self.probe_lease_seconds * 1000), token)
+                    allowed, reason, version, owner, state, previous_state, open_until_ms, probe_owner, probe_expires_ms, server_now_ms = result
+                    self.state = state
+                    _set_circuit_state(self.name, self.model, state)
+                    self._version = int(version)
+                    permit = {"version": int(version), "token": owner or ""} if int(allowed) else None
+                    if state == "OPEN":
+                        self.last_failure_time = (int(open_until_ms) - int(self.cooldown_seconds * 1000)) / 1000
+                        self._probe_owner = ""
+                    elif state == "HALF_OPEN":
+                        self._probe_owner = probe_owner or ""
+                        lease_ms = int(probe_expires_ms or server_now_ms)
+                        self._probe_expires_at = time.time() + max(0, lease_ms - server_now_ms) / 1000
+                    else:
+                        self._probe_owner = ""
+                    if previous_state != state and CIRCUIT_TRANSITIONS:
+                        CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous_state, state, "recovery_timeout").inc()
+                        logger.info("circuit_transition provider=%s model=%s previous=%s current=%s reason=recovery_timeout version=%s", self.name, self.model, previous_state, state, version)
+                    if reason.startswith("half_open_probe") and CIRCUIT_PROBES:
+                        CIRCUIT_PROBES.labels(self.name, self.model, "attempt").inc()
+                    if reason == "half_open_probe_lease_reclaimed" and CIRCUIT_LEASE_EXPIRATIONS:
+                        CIRCUIT_LEASE_EXPIRATIONS.labels(self.name, self.model).inc()
+                    self._degraded = False
+                    if CIRCUIT_DEGRADED:
+                        CIRCUIT_DEGRADED.labels(self.name, self.model).set(0)
+                    if not int(allowed) and CIRCUIT_REJECTIONS:
+                        CIRCUIT_REJECTIONS.labels(self.name, self.model, state).inc()
+                    return bool(int(allowed)), reason, permit
+                except RedisError as exc:
+                    self._degraded = True
+                    if CIRCUIT_REDIS_FAILURES:
+                        CIRCUIT_REDIS_FAILURES.inc()
+                    if CIRCUIT_DEGRADED:
+                        CIRCUIT_DEGRADED.labels(self.name, self.model).set(1)
+                    logger.error("circuit_coordination_degraded provider=%s model=%s reason=redis_unavailable error=%s", self.name, self.model, type(exc).__name__)
             self.total_requests += 1
             now = time.time()
 
             if self.state == "CLOSED":
-                return True, "closed_healthy"
+                _set_circuit_state(self.name, self.model, self.state)
+                return True, "closed_healthy", {"version": self._version, "token": ""}
 
             elif self.state == "OPEN":
                 elapsed = now - self.last_failure_time
                 if elapsed >= self.cooldown_seconds:
+                    previous_state = self.state
                     self.state = "HALF_OPEN"
+                    _set_circuit_state(self.name, self.model, self.state)
+                    if CIRCUIT_TRANSITIONS:
+                        CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous_state, self.state, "recovery_timeout").inc()
+                    if CIRCUIT_PROBES:
+                        CIRCUIT_PROBES.labels(self.name, self.model, "attempt").inc()
+                    self._probe_owner = uuid.uuid4().hex
+                    self._probe_expires_at = now + self.probe_lease_seconds
+                    permit = {"version": self._version, "token": self._probe_owner}
                     logger.info(
                         f"Circuit for '{self.name}' transitioned from OPEN to HALF_OPEN after {elapsed:.1f}s cooldown. Allowing probe."
                     )
-                    return True, "half_open_probe"
+                    return True, "half_open_probe", permit
                 else:
                     remaining = self.cooldown_seconds - elapsed
+                    if CIRCUIT_REJECTIONS:
+                        CIRCUIT_REJECTIONS.labels(self.name, self.model, "OPEN").inc()
                     logger.warning(
                         f"Circuit for '{self.name}' is OPEN. Skipping request ({remaining:.1f}s cooldown remaining)."
                     )
-                    return False, f"circuit_open_{remaining:.1f}s_remaining"
+                    return False, f"circuit_open_{remaining:.1f}s_remaining", None
 
             elif self.state == "HALF_OPEN":
-                # Only 1 test probe at a time in HALF_OPEN
-                return True, "half_open_probe"
+                if self._probe_owner and now < self._probe_expires_at:
+                    if CIRCUIT_REJECTIONS:
+                        CIRCUIT_REJECTIONS.labels(self.name, self.model, "HALF_OPEN").inc()
+                    return False, "half_open_probe_in_progress", None
+                if self._probe_owner:
+                    self._version += 1
+                    if CIRCUIT_LEASE_EXPIRATIONS:
+                        CIRCUIT_LEASE_EXPIRATIONS.labels(self.name, self.model).inc()
+                self._probe_owner = uuid.uuid4().hex
+                self._probe_expires_at = now + self.probe_lease_seconds
+                _set_circuit_state(self.name, self.model, self.state)
+                if CIRCUIT_PROBES:
+                    CIRCUIT_PROBES.labels(self.name, self.model, "attempt").inc()
+                permit = {"version": self._version, "token": self._probe_owner}
+                return True, "half_open_probe", permit
 
-            return True, "unknown"
+            return True, "unknown", {"version": self._version, "token": ""}
 
-    async def record_success(self):
+    async def can_execute(self) -> Tuple[bool, str]:
+        allowed, reason, permit = await self.acquire_permit()
+        self._permit = permit
+        return allowed, reason
+
+    async def record_success(self, permit: Optional[Dict[str, Any]] = None):
         """Record successful execution."""
         async with self._lock:
+            permit = permit or self._permit
+            if self.redis_url and Redis and permit and not self._degraded:
+                if await self._complete_shared("success", permit):
+                    if permit is self._permit:
+                        self._permit = None
+                    return
+                if not self._degraded:
+                    return
+            if permit and (permit.get("version") != self._version or
+                           (self.state == "HALF_OPEN" and permit.get("token") != self._probe_owner)):
+                return
             self.total_successes += 1
             if self.state in ("HALF_OPEN", "OPEN"):
+                previous_state = self.state
                 logger.info(
                     f"Circuit for '{self.name}' recovered to CLOSED after successful request."
                 )
+                if CIRCUIT_TRANSITIONS:
+                    CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous_state, "CLOSED", "success").inc()
+                if previous_state == "HALF_OPEN" and CIRCUIT_PROBES:
+                    CIRCUIT_PROBES.labels(self.name, self.model, "success").inc()
+                if previous_state == "HALF_OPEN" and CIRCUIT_RECOVERY:
+                    CIRCUIT_RECOVERY.labels(self.name, self.model).observe(max(0.0, time.time() - self.last_failure_time))
             self.state = "CLOSED"
+            _set_circuit_state(self.name, self.model, self.state)
             self.consecutive_failures = 0
+            self._probe_owner = ""
+            self._permit = None
 
-    async def record_failure(self, is_retryable: bool = True):
+    async def record_failure(self, is_retryable: bool = True, permit: Optional[Dict[str, Any]] = None):
         """
         Record failed execution.
         Only retryable errors increment failure count and trip the circuit breaker.
@@ -174,20 +342,44 @@ class CircuitBreaker:
             return
 
         async with self._lock:
+            permit = permit or self._permit
+            if self.redis_url and Redis and permit and not self._degraded:
+                if await self._complete_shared("failure", permit):
+                    if permit is self._permit:
+                        self._permit = None
+                    return
+                if not self._degraded:
+                    return
+            if permit and (permit.get("version") != self._version or
+                           (self.state == "HALF_OPEN" and permit.get("token") != self._probe_owner)):
+                return
             self.total_failures += 1
             self.consecutive_failures += 1
             self.last_failure_time = time.time()
 
             if self.state == "HALF_OPEN":
+                previous_state = self.state
                 self.state = "OPEN"
+                _set_circuit_state(self.name, self.model, self.state)
+                self._version += 1
+                self._probe_owner = ""
                 logger.warning(
                     f"Test probe failed for '{self.name}'. Circuit tripped back to OPEN for {self.cooldown_seconds}s."
                 )
+                if CIRCUIT_TRANSITIONS:
+                    CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous_state, "OPEN", "failure").inc()
+                if CIRCUIT_PROBES:
+                    CIRCUIT_PROBES.labels(self.name, self.model, "failure").inc()
             elif self.consecutive_failures >= self.failure_threshold:
+                previous_state = self.state
                 self.state = "OPEN"
+                _set_circuit_state(self.name, self.model, self.state)
+                self._version += 1
                 logger.error(
                     f"Circuit for '{self.name}' TRIPPED to OPEN after {self.consecutive_failures} consecutive failures. Cooldown: {self.cooldown_seconds}s."
                 )
+                if CIRCUIT_TRANSITIONS:
+                    CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous_state, "OPEN", "failure_threshold").inc()
 
     def get_status(self) -> Dict[str, Any]:
         """Return circuit breaker health telemetry."""
@@ -208,11 +400,91 @@ class CircuitBreaker:
             "total_failures": self.total_failures,
         }
 
+    async def get_status_shared(self) -> Dict[str, Any]:
+        if self.redis_url and Redis:
+            try:
+                if self._redis is None:
+                    self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                values = await self._redis.hgetall(self.key)
+                if values:
+                    state = values.get("state", "CLOSED")
+                    remaining = 0.0
+                    if state == "OPEN":
+                        now = await self._redis.time()
+                        now_ms = now[0] * 1000 + now[1] // 1000
+                        remaining = max(0.0, (int(values.get("open_until_ms", 0)) - now_ms) / 1000)
+                    return {"name": self.name, "model": self.model, "state": state,
+                        "consecutive_failures": int(values.get("failures", 0)),
+                        "failure_threshold": self.failure_threshold,
+                        "cooldown_remaining_sec": round(remaining, 1),
+                        "total_requests": int(values.get("total_requests", 0)),
+                        "total_successes": int(values.get("total_successes", 0)),
+                        "total_failures": int(values.get("total_failures", 0)),
+                        "coordination": "redis", "version": int(values.get("version", 0)),
+                        "probe_lease_expires_at_ms": int(values.get("probe_expires_at_ms", 0))}
+            except RedisError as exc:
+                self._degraded = True
+                if CIRCUIT_REDIS_FAILURES:
+                    CIRCUIT_REDIS_FAILURES.inc()
+                if CIRCUIT_DEGRADED:
+                    CIRCUIT_DEGRADED.labels(self.name, self.model).set(1)
+                logger.error("circuit_status_degraded provider=%s model=%s error=%s", self.name, self.model, type(exc).__name__)
+        status = self.get_status()
+        status.update({"model": self.model, "coordination": "local_degraded" if self._degraded else "local", "version": self._version})
+        return status
+
     def reset(self):
         """Manually reset circuit breaker for testing or administrative actions."""
         self.state = "CLOSED"
+        _set_circuit_state(self.name, self.model, self.state)
         self.consecutive_failures = 0
         self.last_failure_time = 0.0
+        self._probe_owner = ""
+        self._probe_expires_at = 0.0
+        self._permit = None
+
+    async def _complete_shared(self, outcome: str, permit: Dict[str, Any]) -> bool:
+        try:
+            if self._redis is None:
+                self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+            version, token = permit["version"], permit["token"]
+            result = await self._redis.eval(_CB_COMPLETE_LUA, 1, self.key, version, token, outcome,
+                self.failure_threshold, int(self.cooldown_seconds * 1000))
+            if not int(result[0]):
+                return False
+            previous, current = result[1], result[2]
+            self.state = current
+            _set_circuit_state(self.name, self.model, current)
+            self._version = int(result[3])
+            if current != "HALF_OPEN":
+                self._probe_owner = ""
+            if previous != current and CIRCUIT_TRANSITIONS:
+                CIRCUIT_TRANSITIONS.labels(self.name, self.model, previous, current, outcome).inc()
+                logger.info("circuit_transition request_id=%s provider=%s model=%s previous=%s current=%s reason=%s version=%s", permit.get("request_id", ""), self.name, self.model, previous, current, outcome, version)
+            if previous == "HALF_OPEN" and CIRCUIT_PROBES:
+                CIRCUIT_PROBES.labels(self.name, self.model, outcome).inc()
+            opened_at_ms, now_ms = result[4], result[5]
+            if previous == "HALF_OPEN" and current == "CLOSED" and int(opened_at_ms or 0) and CIRCUIT_RECOVERY:
+                CIRCUIT_RECOVERY.labels(self.name, self.model).observe(max(0, (int(now_ms) - int(opened_at_ms)) / 1000))
+            return True
+        except RedisError as exc:
+            self._degraded = True
+            if CIRCUIT_REDIS_FAILURES:
+                CIRCUIT_REDIS_FAILURES.inc()
+            if CIRCUIT_DEGRADED:
+                CIRCUIT_DEGRADED.labels(self.name, self.model).set(1)
+            logger.error("Circuit Redis completion unavailable; using process-local degraded mode provider=%s error=%s", self.name, type(exc).__name__)
+            return False
+
+    async def reset_shared(self):
+        self.reset()
+        if self.redis_url and Redis:
+            try:
+                if self._redis is None:
+                    self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                await self._redis.delete(self.key)
+            except RedisError as exc:
+                logger.error("Circuit reset could not reach Redis provider=%s error=%s", self.name, type(exc).__name__)
 
 
 # Provider Circuit Breakers Registry
@@ -223,6 +495,53 @@ CIRCUIT_BREAKERS: Dict[str, CircuitBreaker] = {
     "mock": CircuitBreaker("mock", failure_threshold=5, cooldown_seconds=60.0),
     "mock2": CircuitBreaker("mock2", failure_threshold=5, cooldown_seconds=60.0),
 }
+
+MODEL_CIRCUIT_BREAKERS: Dict[str, CircuitBreaker] = {}
+
+
+def get_model_circuit_breaker(provider: str, model: str) -> CircuitBreaker:
+    """Return a shared breaker scoped to one provider/model failure domain."""
+    domain = f"{provider.lower()}:{model}"
+    breaker = MODEL_CIRCUIT_BREAKERS.get(domain)
+    if breaker is None:
+        options = load_models_config().get("circuit_breakers", {})
+        provider_options = options.get("providers", {}).get(provider.lower(), {})
+        breaker = CircuitBreaker(
+            provider.lower(),
+            failure_threshold=int(provider_options.get("failure_threshold", options.get("failure_threshold", 5))),
+            cooldown_seconds=float(provider_options.get("recovery_timeout_seconds", options.get("recovery_timeout_seconds", 60))),
+        )
+        breaker.model = model
+        breaker.key = "llm-gateway:circuit:" + hashlib.sha256(domain.encode()).hexdigest()
+        breaker.probe_lease_seconds = float(provider_options.get("probe_lease_seconds", options.get("probe_lease_seconds", 30)))
+        MODEL_CIRCUIT_BREAKERS[domain] = breaker
+    return breaker
+
+
+async def reset_all_circuit_breakers() -> None:
+    for cb in list(CIRCUIT_BREAKERS.values()) + list(MODEL_CIRCUIT_BREAKERS.values()):
+        await cb.reset_shared()
+
+
+async def reset_provider_circuit_breakers(provider: str) -> None:
+    for cb in list(CIRCUIT_BREAKERS.values()) + list(MODEL_CIRCUIT_BREAKERS.values()):
+        if cb.name == provider.lower():
+            await cb.reset_shared()
+
+
+async def get_all_circuit_breaker_status() -> Dict[str, Any]:
+    items = [(name, cb) for name, cb in CIRCUIT_BREAKERS.items()]
+    items.extend((domain, cb) for domain, cb in MODEL_CIRCUIT_BREAKERS.items())
+    return {name: await cb.get_status_shared() for name, cb in items}
+
+
+async def trip_provider_circuit_breakers(provider: str) -> None:
+    cb = CIRCUIT_BREAKERS[provider.lower()]
+    await cb.reset_shared()
+    for _ in range(cb.failure_threshold):
+        allowed, _, permit = await cb.acquire_permit()
+        if allowed:
+            await cb.record_failure(permit=permit)
 
 
 # ---------------------------------------------------------------------------
@@ -892,13 +1211,15 @@ async def dispatch_single_attempt(
     if not adapter:
         raise ValueError(f"Unknown provider '{provider}'")
 
-    res = await adapter.generate(
-        messages=messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        client=client,
-    )
+    from app.tracing import span
+    with span("provider.request", {"provider": provider.lower(), "model": model}):
+        res = await adapter.generate(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            client=client,
+        )
     return res["text"], res["finish_reason"], res["token_usage"]
 
 
@@ -992,6 +1313,9 @@ def set_failure_injection(provider: str, enabled: bool, mode: str = "503") -> Di
             cb = CIRCUIT_BREAKERS.get(provider)
             if cb and cb.state == "OPEN":
                 cb.reset()
+            for model_cb in MODEL_CIRCUIT_BREAKERS.values():
+                if model_cb.name == provider:
+                    model_cb.reset()
     return INJECTED_FAILURES.get(provider, {"enabled": False, "mode": "503"})
 
 
@@ -1122,7 +1446,7 @@ async def update_provider_api_key(provider: str, new_key: str) -> Dict[str, Any]
     # Reset circuit breaker for this provider so the flow restarts clean!
     cb = CIRCUIT_BREAKERS.get(provider)
     if cb:
-        cb.reset()
+        await reset_provider_circuit_breakers(provider)
 
     masked = mask_api_key(clean_key)
     logger.info(f"Updated key for '{provider}'. Validated & applied: {masked}. Circuit breaker reset.")
@@ -1332,7 +1656,12 @@ async def execute_reliable_completion(
                 for provider_idx, target_config in enumerate(chain):
                     provider = target_config["provider"]
                     model = target_config["model"]
-                    cb = CIRCUIT_BREAKERS.get(provider)
+                    administrative_cb = CIRCUIT_BREAKERS.get(provider)
+                    cb = get_model_circuit_breaker(provider, model)
+                    cb_permit = None
+                    administrative_permit = None
+                    administrative_probe = False
+                    probe_attempt = False
                     pool = PROVIDER_POOLS.get(provider)
 
                     if provider_idx > 0:
@@ -1343,10 +1672,29 @@ async def execute_reliable_completion(
                     if remaining_budget <= 0.01:
                         raise asyncio.TimeoutError("Hard total deadline exhausted before provider attempt")
 
-                    # Check Circuit Breaker
+                    # Provider-wide admin breaker gates all models; health state remains model-scoped.
+                    can_run, reason = True, "closed_healthy"
+                    if administrative_cb:
+                        injected_open = INJECTED_FAILURES.get(provider, {}).get("enabled") and INJECTED_FAILURES.get(provider, {}).get("mode") == "circuit_open"
+                        if administrative_cb.state == "OPEN" and not administrative_cb.redis_url:
+                            can_run, reason = False, "administrative_provider_override"
+                        elif injected_open:
+                            can_run, reason = False, "administrative_provider_override"
+                        else:
+                            can_run, reason, administrative_permit = await administrative_cb.acquire_permit()
+                            administrative_probe = can_run and reason.startswith("half_open_probe")
+                            probe_attempt = administrative_probe
+                    if can_run and cb:
+                        can_run, reason, cb_permit = await cb.acquire_permit()
+                        if cb_permit is not None:
+                            cb_permit["request_id"] = req_id
+                        probe_attempt = probe_attempt or (can_run and reason.startswith("half_open_probe"))
                     if cb:
-                        can_run, reason = await cb.can_execute()
                         if not can_run:
+                            if administrative_probe and administrative_cb:
+                                # The model breaker rejected the candidate, so no provider
+                                # probe was sent; release the provider-wide probe permit.
+                                await administrative_cb.record_success(permit=administrative_permit)
                             logger.warning(
                                 f"[{req_id}] [CIRCUIT BREAKER] Skipping '{provider}' (reason: {reason}). Moving to next provider."
                             )
@@ -1427,7 +1775,7 @@ async def execute_reliable_completion(
 
                     # Slot acquired! Must ALWAYS release in finally block
                     try:
-                        total_attempts_for_provider = 1 + max_retries_per_provider
+                        total_attempts_for_provider = 1 if probe_attempt else 1 + max_retries_per_provider
                         provider_succeeded = False
 
                         for attempt_num in range(1, total_attempts_for_provider + 1):
@@ -1497,7 +1845,9 @@ async def execute_reliable_completion(
                                 overall_latency = round((time.perf_counter() - overall_start_time) * 1000, 2)
 
                                 if cb:
-                                    await cb.record_success()
+                                    await cb.record_success(permit=cb_permit)
+                                if administrative_probe and administrative_cb:
+                                    await administrative_cb.record_success(permit=administrative_permit)
 
                                 NODE_METRICS[provider]["served"] += 1
                                 NODE_METRICS["router"]["served"] += 1
@@ -1568,8 +1918,12 @@ async def execute_reliable_completion(
                                 "is_retryable": is_retryable,
                             })
 
-                            if cb and is_retryable:
-                                await cb.record_failure(is_retryable=True)
+                            if CIRCUIT_FAILURES:
+                                CIRCUIT_FAILURES.labels(provider, model, error_type).inc()
+                            if cb and should_count_circuit_failure(status_code, is_retryable, provider):
+                                await cb.record_failure(is_retryable=True, permit=cb_permit)
+                            if administrative_probe and administrative_cb and should_count_circuit_failure(status_code, is_retryable, provider):
+                                await administrative_cb.record_failure(is_retryable=True, permit=administrative_permit)
 
                             attempts_log.append({
                                 "provider": provider,

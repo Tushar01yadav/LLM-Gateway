@@ -16,7 +16,7 @@ import re
 
 import secrets
 
-import sqlite3
+from app.db import sqlite3
 
 import subprocess
 
@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 import urllib.parse
 
 from pydantic import BaseModel, Field
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 
 from app.security import (
     create_gateway_api_key,
@@ -55,17 +56,19 @@ from app.security import (
 )
 
 from app.cost import (
-    BUDGET_GUARD,
     COST_TRACKER,
     REQUEST_COALESCER,
     RESPONSE_CACHE,
     build_cache_key,
     calculate_request_cost,
+    estimate_request_cost,
+    resolve_token_usage,
 )
 
 from app.jobs import JOB_MANAGER
 from app.guardrails import GUARDRAILS, AUDIT_LOGGER
 from app.metrics import latency_percentiles
+from app.tracing import configure_tracing, inject_trace_context, shutdown_tracing
 
 from app.reliability import (
 
@@ -86,6 +89,14 @@ from app.reliability import (
     update_provider_api_key,
 
     get_provider_nodes_info,
+
+    get_all_circuit_breaker_status,
+
+    reset_all_circuit_breakers,
+
+    trip_provider_circuit_breakers,
+
+    reset_provider_circuit_breakers,
 
     get_concurrency_metrics,
 
@@ -533,9 +544,9 @@ def db_get_storage_info() -> Dict[str, Any]:
 
         "db_size_bytes": file_size_bytes,
 
-        "storage_type": "SQLite Persistent Storage",
+        "storage_type": "Supabase PostgreSQL" if os.getenv("DATABASE_URL") else "SQLite Persistent Storage",
 
-        "db_path": os.path.basename(DB_PATH),
+        "db_path": "Supabase PostgreSQL" if os.getenv("DATABASE_URL") else os.path.basename(DB_PATH),
 
     }
 
@@ -762,21 +773,29 @@ def check_startup_keys():
 
 async def lifespan(app: FastAPI):
 
-    check_deploy_config()
+    configure_tracing(app)
+    worker_started = False
+    try:
+        check_deploy_config()
 
-    check_startup_keys()
+        check_startup_keys()
 
-    init_db()
+        init_db()
 
-    init_node_metrics_from_db()
+        init_node_metrics_from_db()
 
-    await JOB_MANAGER.start_worker()
+        await JOB_MANAGER.start_worker()
+        worker_started = True
 
-    asyncio.create_task(run_startup_smoke_test())
+        asyncio.create_task(run_startup_smoke_test())
 
-    yield
-
-    await JOB_MANAGER.stop_worker()
+        yield
+    finally:
+        try:
+            if worker_started:
+                await JOB_MANAGER.stop_worker()
+        finally:
+            shutdown_tracing()
 
 app = FastAPI(
 
@@ -791,6 +810,46 @@ app = FastAPI(
     lifespan=lifespan,
 
 )
+
+HTTP_REQUESTS = Counter(
+    "gateway_http_requests_total",
+    "Total HTTP requests handled by the gateway",
+    ("method", "route", "status_code"),
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "gateway_http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ("method", "route"),
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+)
+HTTP_REQUESTS_IN_PROGRESS = Gauge(
+    "gateway_http_requests_in_progress",
+    "Number of HTTP requests currently being handled",
+    ("method",),
+)
+
+
+@app.middleware("http")
+async def record_http_metrics(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    method = request.method
+    started = time.perf_counter()
+    HTTP_REQUESTS_IN_PROGRESS.labels(method=method).inc()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        HTTP_REQUESTS.labels(method=method, route=route, status_code=str(status_code)).inc()
+        HTTP_REQUEST_DURATION.labels(method=method, route=route).observe(time.perf_counter() - started)
+        HTTP_REQUESTS_IN_PROGRESS.labels(method=method).dec()
+
+
+app.mount("/metrics", make_asgi_app(), name="metrics")
 
 # Dashboard assets are vendored and pinned (see app/static/vendor); the page
 # also carries SRI hashes so a modified file fails to load.
@@ -1010,7 +1069,7 @@ def db_get_gateway_stats() -> Dict[str, Any]:
 
 @app.get("/api/stats")
 
-async def get_stats():
+async def get_stats(admin_auth: bool = Depends(verify_admin_auth)):
 
     return await asyncio.to_thread(db_get_gateway_stats)
 
@@ -1030,7 +1089,7 @@ async def clear_logs(admin_auth: bool = Depends(verify_admin_auth)):
 
 @app.get("/api/concurrency/status")
 
-async def get_concurrency_status():
+async def get_concurrency_status(admin_auth: bool = Depends(verify_admin_auth)):
 
     return get_concurrency_metrics()
 
@@ -1038,7 +1097,7 @@ async def get_concurrency_status():
 
 async def get_reliability_status(admin_auth: bool = Depends(verify_admin_auth)):
 
-    cb_status = {name: cb.get_status() for name, cb in CIRCUIT_BREAKERS.items()}
+    cb_status = await get_all_circuit_breaker_status()
 
     return {
 
@@ -1064,9 +1123,7 @@ async def get_reliability_status(admin_auth: bool = Depends(verify_admin_auth)):
 
 async def reset_circuit_breakers(admin_auth: bool = Depends(verify_admin_auth)):
 
-    for cb in CIRCUIT_BREAKERS.values():
-
-        cb.reset()
+    await reset_all_circuit_breakers()
 
     return {"status": "all_reset"}
 
@@ -1074,17 +1131,12 @@ async def reset_circuit_breakers(admin_auth: bool = Depends(verify_admin_auth)):
 
 async def trip_circuit_breaker(provider: str, admin_auth: bool = Depends(verify_admin_auth)):
 
-    cb = CIRCUIT_BREAKERS.get(provider.lower())
-
-    if not cb:
+    provider = provider.lower()
+    if provider not in CIRCUIT_BREAKERS:
 
         raise HTTPException(status_code=404, detail=f"Provider '{provider}' not found")
 
-    cb.state = "OPEN"
-
-    cb.consecutive_failures = cb.failure_threshold
-
-    cb.last_failure_time = time.time()
+    await trip_provider_circuit_breakers(provider)
 
     return {"status": "tripped", "provider": provider}
 
@@ -1135,6 +1187,15 @@ async def get_provider_nodes(admin_auth: bool = Depends(verify_admin_auth)):
     init_node_metrics_from_db()
 
     nodes = get_provider_nodes_info()
+    breaker_status = await get_all_circuit_breaker_status()
+    for node in nodes:
+        provider_breakers = [status for status in breaker_status.values()
+            if status.get("name") == node["provider"] and status.get("model")]
+        if provider_breakers:
+            node["circuit_breakers_by_model"] = {status["model"]: status for status in provider_breakers}
+            non_closed = next((status for status in provider_breakers if status["state"] != "CLOSED"), None)
+            if non_closed:
+                node["circuit_breaker"] = non_closed
 
     snapshot = await asyncio.to_thread(latency_percentiles)
 
@@ -1191,7 +1252,7 @@ async def api_create_gateway_key(payload: CreateGatewayKeyPayload, admin_auth: b
 
 @app.get("/api/cost/metrics")
 
-async def api_get_cost_metrics():
+async def api_get_cost_metrics(admin_auth: bool = Depends(verify_admin_auth)):
 
     total_cost = await COST_TRACKER.get_total_spend()
 
@@ -1262,6 +1323,7 @@ async def create_async_job(
         "messages": [{"role": m.role, "content": m.content} for m in request.messages],
         "temperature": request.temperature,
         "max_tokens": max(1, min(int(requested_max_tokens), GUARDRAILS.max_tokens)),
+        "_trace_context": inject_trace_context(),
     }
 
     job_info = await JOB_MANAGER.enqueue_job(
@@ -1336,7 +1398,7 @@ async def clear_dlq_jobs(admin_auth: bool = Depends(verify_admin_auth)):
 
 @app.post("/api/reliability/clear-cache")
 async def api_clear_response_cache(admin_auth: bool = Depends(verify_admin_auth)):
-    RESPONSE_CACHE.clear()
+    await RESPONSE_CACHE.clear()
     if "cache" in NODE_METRICS:
         NODE_METRICS["cache"]["served"] = 0
     return {"status": "ok", "message": "Redis Response Cache cleared successfully"}
@@ -1353,6 +1415,8 @@ async def inject_failure(payload: FailureInjectPayload, admin_auth: bool = Depen
     """Controls: Break this provider toggle for failure injection demo."""
 
     res = set_failure_injection(payload.provider, payload.enabled, payload.mode or "503")
+    if not payload.enabled:
+        await reset_provider_circuit_breakers(payload.provider.lower())
 
     return res
 
@@ -2416,29 +2480,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             headers={"Retry-After": str(retry_after)},
         )
 
-    # -----------------------------------------------------------------------
-    # Step 2b: Budget Guard (Per-key daily budget limit)
-    # -----------------------------------------------------------------------
     key_daily_budget = float(key_info.get("daily_budget") or 5.0)
-    budget_ok, current_spend, budget_limit = await BUDGET_GUARD.check_budget(
-        str(key_info["id"]), key_info["name"], key_daily_budget
-    )
-    if not budget_ok:
-        logger.warning(
-            f"[BUDGET] Key '{key_info['name']}' exceeded daily budget: ${current_spend:.4f} >= ${budget_limit:.2f}"
-        )
-        await TRAFFIC_BROADCASTER.broadcast("budget_blocked", {
-            "key_id": key_info["id"],
-            "key_name": key_info["name"],
-            "current_spend": current_spend,
-            "daily_budget": budget_limit,
-            "status_code": 429,
-        })
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Budget exceeded: Daily budget limit of ${budget_limit:.2f} reached for API key '{key_info['name']}'. Current spend today: ${current_spend:.4f}.",
-        )
-
     # -----------------------------------------------------------------------
     # Step 3 in Pipeline: Validate & Input Guardrails (OWASP Top 10)
     # -----------------------------------------------------------------------
@@ -2573,6 +2615,21 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             "alias": target,
         })
 
+    estimated_cost = estimate_request_cost(target, target, messages_payload, effective_max_tokens)
+    reservation_id, current_spend = await COST_TRACKER.reserve_budget(
+        str(key_info["id"]), key_info["name"], key_daily_budget, estimated_cost
+    )
+    if reservation_id is None:
+        logger.warning("[BUDGET] Key '%s' rejected at atomic reservation; current daily commitment=$%.4f limit=$%.2f", key_info["name"], current_spend, key_daily_budget)
+        await TRAFFIC_BROADCASTER.broadcast("budget_blocked", {
+            "key_id": key_info["id"], "key_name": key_info["name"],
+            "current_spend": current_spend, "daily_budget": key_daily_budget, "status_code": 429,
+        })
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Budget exceeded: Daily budget limit of ${key_daily_budget:.2f} cannot reserve estimated request cost.",
+        )
+
     # -----------------------------------------------------------------------
     # Step 4 in Pipeline: Request Coalescing & Global Concurrency Bulkhead
     # -----------------------------------------------------------------------
@@ -2594,7 +2651,11 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
                 "target": target,
                 "alias": target,
             })
+    except asyncio.CancelledError:
+        await COST_TRACKER.release_budget(reservation_id, str(key_info["id"]))
+        raise
     except Exception as exc:
+        await COST_TRACKER.release_budget(reservation_id, str(key_info["id"]))
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         status_code = 502
         if isinstance(exc, HTTPException):
@@ -2630,7 +2691,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
     text = result["text"]
     finish_reason = result["finish_reason"]
     token_usage = result["token_usage"]
-    total_tokens = token_usage.get("total_tokens", 0)
+    prompt_tokens, completion_tokens, total_tokens = resolve_token_usage(token_usage, messages_payload, text)
     provider = result["provider"]
     model = result["model"]
     fallback_used = result["fallback_used"]
@@ -2668,17 +2729,20 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
         messages=messages_payload,
         completion_text=text,
     )
-    await COST_TRACKER.record_cost(
+    settled = await COST_TRACKER.settle_budget(
+        reservation_id=reservation_id,
         key_id=str(key_info["id"]),
         key_name=key_info["name"],
         alias=target,
         provider=provider,
         model=model,
-        prompt_tokens=token_usage.get("prompt_tokens", 1),
-        completion_tokens=token_usage.get("completion_tokens", 1),
-        total_tokens=total_tokens or (token_usage.get("prompt_tokens", 1) + token_usage.get("completion_tokens", 1)),
-        cost_usd=cost_usd,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        actual_cost=cost_usd,
     )
+    if not settled:
+        raise HTTPException(status_code=503, detail="Budget reservation expired before settlement; retry the request.")
     total_spent = await COST_TRACKER.get_total_spend()
     await TRAFFIC_BROADCASTER.broadcast("cost_updated", {
         "key_id": key_info["id"],
@@ -3879,13 +3943,17 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     .light-theme #visualizePage,
 
-    .light-theme #studioCanvasViewport {
+    .light-theme #studioCanvasViewport,
+
+    .light-theme #chaosEngineeringViewport {
 
       background-color: #f1f5f9 !important;
 
     }
 
-    .light-theme #studioCanvasViewport {
+    .light-theme #studioCanvasViewport,
+
+    .light-theme #chaosEngineeringViewport {
 
       background-image: radial-gradient(circle, rgba(15, 23, 42, 0.10) 1.2px, transparent 1.2px) !important;
 
@@ -6228,6 +6296,13 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       </div>
 
+      <div class="flex gap-2 mb-5 border-b border-white/10" role="tablist" aria-label="Observability views">
+        <button id="observabilityReliabilityButton" type="button" role="tab" aria-selected="true" onclick="showObservabilityTab('reliability')" class="px-3 py-2 text-xs font-semibold border-b-2 border-cyan-400 text-cyan-300">Reliability</button>
+        <button id="observabilityMetricsButton" type="button" role="tab" aria-selected="false" onclick="showObservabilityTab('metrics')" class="px-3 py-2 text-xs font-semibold border-b-2 border-transparent text-gray-400 hover:text-white">Prometheus & Grafana</button>
+      </div>
+
+      <div id="observabilityReliabilityTab" role="tabpanel">
+
       <!-- Circuit Breakers Grid -->
 
       <div class="glass-panel p-5 rounded-2xl border border-white/10 mb-6">
@@ -6306,17 +6381,34 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       </div>
 
+      </div>
+
+      <div id="observabilityMetricsTab" role="tabpanel" class="hidden flex-1 min-h-[600px] flex-col">
+        <div class="flex items-center justify-between mb-3 text-xs text-gray-400">
+          <span>Gateway request rate, errors, latency percentiles, and in-flight requests. Metrics refresh every 15 seconds.</span>
+          <div class="flex gap-2">
+            <a id="observabilityOpenPrometheus" href="http://localhost:19090" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 rounded-lg border border-orange-500/30 bg-orange-950/30 text-orange-200 hover:bg-orange-900/50">Open Prometheus ↗</a>
+            <a id="observabilityOpenGrafana" href="http://localhost:13000/d/gateway-overview/gateway-overview?orgId=1" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 rounded-lg border border-cyan-500/30 bg-cyan-950/30 text-cyan-200 hover:bg-cyan-900/50">Open Grafana ↗</a>
+          </div>
+        </div>
+        <iframe id="observabilityGrafanaFrame" title="LLM Gateway Grafana dashboard" class="flex-1 w-full min-h-[600px] rounded-xl border border-white/10 bg-[#0b0e14]" src="about:blank" loading="lazy" allowfullscreen></iframe>
+      </div>
+
     </div>
 
     <!-- Visualize Page: Modern Architecture Studio & Interactive Resilience Canvas (Exact Match to Design Brief) -->
 
     <div id="visualizePage" class="hidden flex-1 flex flex-col h-full w-full overflow-hidden relative bg-[#090b11] select-none">
+      <div class="flex items-center gap-2 px-4 py-2 bg-[#090b11] border-b border-white/10 shrink-0" role="tablist" aria-label="Visualizer views">
+        <button id="visualizerCanvasTabButton" type="button" role="tab" aria-selected="true" onclick="showVisualizerTab('canvas')" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-cyan-500/30 bg-cyan-950/40 text-cyan-200">Traffic Canvas</button>
+        <button id="visualizerChaosTabButton" type="button" role="tab" aria-selected="false" onclick="showVisualizerTab('chaos')" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/10 bg-white/5 text-gray-400 hover:text-white">Chaos Engineering</button>
+      </div>
 
       
 
       <!-- Main Studio Canvas Body -->
 
-      <div id="studioCanvasViewport" class="relative flex-1 w-full h-full overflow-hidden bg-[#090b11]" style="background-image: radial-gradient(circle, rgba(255, 255, 255, 0.08) 1.2px, transparent 1.2px); background-size: 24px 24px;">
+      <div id="studioCanvasViewport" class="relative order-2 flex-1 min-h-0 w-full overflow-hidden bg-[#090b11]" style="background-image: radial-gradient(circle, rgba(255, 255, 255, 0.08) 1.2px, transparent 1.2px); background-size: 24px 24px;">
 
         
 
@@ -6410,44 +6502,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             <span id="vizCostValue" class="font-bold text-white tracking-wide">0.000000</span>
             <span class="text-[9.5px] text-emerald-400 font-sans uppercase">USD</span>
           </div>
-
-        </div>
-
-        <!-- Chaos Control Bar (admin token required; Redis controls need GATEWAY_ALLOW_CHAOS=1) -->
-
-        <div id="vizChaosBar" class="absolute top-[68px] left-6 z-20 flex items-center gap-1.5 bg-[#141923]/90 border border-rose-500/20 rounded-2xl p-1.5 px-2.5 shadow-2xl backdrop-blur-md max-w-[calc(100vw-220px)] overflow-x-auto text-[11px]">
-
-          <span class="text-[9px] font-bold text-rose-400 uppercase tracking-wider px-1">Chaos</span>
-
-          <select id="chaosProviderSelect" class="bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer font-medium" title="Provider to disrupt">
-
-            <option value="mock" selected>Mock A</option>
-
-            <option value="mock2">Mock B</option>
-
-            <option value="groq">Groq</option>
-
-            <option value="openrouter">OpenRouter</option>
-
-            <option value="gemini">Gemini</option>
-
-          </select>
-
-          <button id="chaosKillBtn" type="button" onclick="chaosToggleProvider()" class="px-2 py-1 rounded-lg bg-rose-900/70 hover:bg-rose-900 border border-rose-500/40 text-rose-200 font-bold transition cursor-pointer" title="Toggle a 503 outage on the selected provider">Kill Provider</button>
-
-          <input id="chaosLatencyInput" type="number" min="0" max="20000" step="100" value="1500" title="Latency in milliseconds" class="w-14 text-center bg-transparent text-amber-300 font-bold border-b border-amber-500/50 focus:outline-none" />
-
-          <button type="button" onclick="chaosInjectLatency()" class="px-2 py-1 rounded-lg bg-amber-950/70 hover:bg-amber-900 border border-amber-500/40 text-amber-200 font-bold transition cursor-pointer" title="Inject latency on the selected mock provider">Inject Latency</button>
-
-          <button type="button" onclick="chaosResetLatency()" class="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 font-bold transition cursor-pointer" title="Clear injected latency">Reset</button>
-
-          <div class="h-3.5 w-px bg-white/10"></div>
-
-          <button type="button" onclick="chaosRedis('down')" class="px-2 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 border border-rose-500/30 text-rose-300 font-bold transition cursor-pointer" title="Stop the local Redis container (requires GATEWAY_ALLOW_CHAOS=1)">Redis Down</button>
-
-          <button type="button" onclick="chaosRedis('up')" class="px-2 py-1 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 font-bold transition cursor-pointer" title="Start the local Redis container">Redis Up</button>
-
-          <span id="chaosStatus" class="text-gray-400 font-mono text-[10px] max-w-[240px] truncate"></span>
 
         </div>
 
@@ -7109,6 +7163,54 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       </div>
 
+      <div id="chaosEngineeringViewport" class="hidden order-1 flex-none w-full relative bg-[#090b11]" style="background-image: radial-gradient(circle, rgba(255, 255, 255, 0.08) 1.2px, transparent 1.2px); background-size: 24px 24px;">
+        <div class="max-w-6xl mx-auto w-full px-6 py-2">
+          <div class="glass-panel p-3 rounded-2xl border border-rose-500/20 bg-[#0c101a]/90">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div class="text-xs font-bold text-white uppercase tracking-wider">Chaos Fault Controls</div>
+              <div class="text-[10px] text-gray-400">Provider fault injection requires an admin token. Redis controls require GATEWAY_ALLOW_CHAOS=1.</div>
+            </div>
+
+        <!-- Chaos Control Bar (admin token required; Redis controls need GATEWAY_ALLOW_CHAOS=1) -->
+
+        <div id="vizChaosBar" class="flex flex-wrap items-center gap-2 text-[11px]">
+
+          <span class="text-[9px] font-bold text-rose-400 uppercase tracking-wider px-1">Chaos</span>
+
+          <select id="chaosProviderSelect" class="bg-black/50 border border-white/10 rounded-lg px-1.5 py-1 text-[11px] text-white focus:outline-none focus:border-rose-500 cursor-pointer font-medium" title="Provider to disrupt">
+
+            <option value="mock" selected>Mock A</option>
+
+            <option value="mock2">Mock B</option>
+
+            <option value="groq">Groq</option>
+
+            <option value="openrouter">OpenRouter</option>
+
+            <option value="gemini">Gemini</option>
+
+          </select>
+
+          <button id="chaosKillBtn" type="button" onclick="chaosToggleProvider()" class="px-2 py-1 rounded-lg bg-rose-900/70 hover:bg-rose-900 border border-rose-500/40 text-rose-200 font-bold transition cursor-pointer" title="Toggle a 503 outage on the selected provider">Kill Provider</button>
+
+          <input id="chaosLatencyInput" type="number" min="0" max="20000" step="100" value="1500" title="Latency in milliseconds" class="w-14 text-center bg-transparent text-amber-300 font-bold border-b border-amber-500/50 focus:outline-none" />
+
+          <button type="button" onclick="chaosInjectLatency()" class="px-2 py-1 rounded-lg bg-amber-950/70 hover:bg-amber-900 border border-amber-500/40 text-amber-200 font-bold transition cursor-pointer" title="Inject latency on the selected mock provider">Inject Latency</button>
+
+          <button type="button" onclick="chaosResetLatency()" class="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 font-bold transition cursor-pointer" title="Clear injected latency">Reset</button>
+
+          <div class="h-3.5 w-px bg-white/10"></div>
+
+          <button type="button" onclick="chaosRedis('down')" class="px-2 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900 border border-rose-500/30 text-rose-300 font-bold transition cursor-pointer" title="Stop the local Redis container (requires GATEWAY_ALLOW_CHAOS=1)">Redis Down</button>
+
+          <button type="button" onclick="chaosRedis('up')" class="px-2 py-1 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/30 text-emerald-300 font-bold transition cursor-pointer" title="Start the local Redis container">Redis Up</button>
+
+          <span id="chaosStatus" class="text-gray-400 font-mono text-[10px] max-w-[240px] truncate"></span>
+
+        </div>
+
+        </div>
+      </div>
     </div>
 
     <!-- Provider API Key Edit Modal -->
@@ -8350,6 +8452,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
       if (typeof initTrafficStream === 'function') initTrafficStream();
       if (typeof refreshVisualizeData === 'function') refreshVisualizeData();
+      if (typeof checkMailerStatus === 'function') checkMailerStatus();
     }
 
     function clearAdminToken() {
@@ -8358,11 +8461,16 @@ HTML_CONTENT = """<!DOCTYPE html>
       __gwAdminToken = '';
       try { sessionStorage.removeItem('gw_admin_token'); } catch (e) {}
       updateAdminTokenStatus();
+      if (typeof trafficEventSource !== 'undefined' && trafficEventSource) {
+        try { trafficEventSource.close(); } catch (e) {}
+        trafficEventSource = null;
+      }
+      if (typeof initTrafficStream === 'function') initTrafficStream();
     }
 
     (function installAdminFetch() {
       const originalFetch = window.fetch.bind(window);
-      const adminPaths = /^\/(api\/reliability|api\/logs|api\/audit-logs|api\/gateway-keys|v1\/dlq|api\/auth\/mailer-status)/;
+      const adminPaths = /^\/(api\/reliability|api\/logs|api\/audit-logs|api\/gateway-keys|api\/stats|api\/concurrency\/status|api\/cost\/metrics|v1\/dlq|api\/auth\/mailer-status)/;
       window.fetch = function (input, init) {
         init = init || {};
         const url = typeof input === 'string' ? input : (input && input.url) || '';
@@ -9149,6 +9257,45 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     }
 
+    function showObservabilityTab(tab) {
+
+      const metricsSelected = tab === 'metrics';
+      const reliabilityTab = document.getElementById('observabilityReliabilityTab');
+      const metricsTab = document.getElementById('observabilityMetricsTab');
+      const reliabilityButton = document.getElementById('observabilityReliabilityButton');
+      const metricsButton = document.getElementById('observabilityMetricsButton');
+
+      if (reliabilityTab) reliabilityTab.classList.toggle('hidden', metricsSelected);
+      if (metricsTab) {
+        metricsTab.classList.toggle('hidden', !metricsSelected);
+        metricsTab.classList.toggle('flex', metricsSelected);
+      }
+
+      if (reliabilityButton) {
+        reliabilityButton.setAttribute('aria-selected', String(!metricsSelected));
+        reliabilityButton.className = metricsSelected
+          ? 'px-3 py-2 text-xs font-semibold border-b-2 border-transparent text-gray-400 hover:text-white'
+          : 'px-3 py-2 text-xs font-semibold border-b-2 border-cyan-400 text-cyan-300';
+      }
+      if (metricsButton) {
+        metricsButton.setAttribute('aria-selected', String(metricsSelected));
+        metricsButton.className = metricsSelected
+          ? 'px-3 py-2 text-xs font-semibold border-b-2 border-cyan-400 text-cyan-300'
+          : 'px-3 py-2 text-xs font-semibold border-b-2 border-transparent text-gray-400 hover:text-white';
+      }
+
+      if (metricsSelected) {
+        const grafanaBase = `${window.location.protocol}//${window.location.hostname}:13000`;
+        const dashboardUrl = `${grafanaBase}/d/gateway-overview/gateway-overview?orgId=1&kiosk`;
+        const frame = document.getElementById('observabilityGrafanaFrame');
+        const openPrometheus = document.getElementById('observabilityOpenPrometheus');
+        const openGrafana = document.getElementById('observabilityOpenGrafana');
+        if (frame && frame.src === 'about:blank') frame.src = dashboardUrl;
+        if (openPrometheus) openPrometheus.href = `${window.location.protocol}//${window.location.hostname}:19090`;
+        if (openGrafana) openGrafana.href = `${grafanaBase}/d/gateway-overview/gateway-overview?orgId=1`;
+      }
+    }
+
     async function refreshObservabilityData() {
 
       try {
@@ -9544,6 +9691,31 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
     });
 
+    function showVisualizerTab(tab) {
+
+      const chaosSelected = tab === 'chaos';
+      const chaosViewport = document.getElementById('chaosEngineeringViewport');
+      const canvasButton = document.getElementById('visualizerCanvasTabButton');
+      const chaosButton = document.getElementById('visualizerChaosTabButton');
+
+      if (chaosViewport) {
+        chaosViewport.classList.toggle('hidden', !chaosSelected);
+        chaosViewport.classList.toggle('flex', chaosSelected);
+      }
+      if (canvasButton) {
+        canvasButton.setAttribute('aria-selected', String(!chaosSelected));
+        canvasButton.className = chaosSelected
+          ? 'px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/10 bg-white/5 text-gray-400 hover:text-white'
+          : 'px-3 py-1.5 rounded-lg text-xs font-semibold border border-cyan-500/30 bg-cyan-950/40 text-cyan-200';
+      }
+      if (chaosButton) {
+        chaosButton.setAttribute('aria-selected', String(chaosSelected));
+        chaosButton.className = chaosSelected
+          ? 'px-3 py-1.5 rounded-lg text-xs font-semibold border border-rose-500/30 bg-rose-950/40 text-rose-200'
+          : 'px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/10 bg-white/5 text-gray-400 hover:text-white';
+      }
+    }
+
     function initVisualizeView() {
 
       // Set crisp provider SVG logos into node headers
@@ -9632,13 +9804,16 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       const statusText = document.getElementById('vizSseStatusText');
 
+      if (!__gwAdminToken) {
+        if (statusText) statusText.innerText = 'Admin token required';
+        const sText = document.getElementById('studioSseStatusText');
+        if (sText) sText.innerText = 'Admin token required';
+        return;
+      }
+
       try {
 
-        trafficEventSource = __gwAdminToken
-
-          ? createAdminEventSource('/api/reliability/traffic-stream', __gwAdminToken)
-
-          : new EventSource('/api/reliability/traffic-stream');
+        trafficEventSource = createAdminEventSource('/api/reliability/traffic-stream', __gwAdminToken);
 
         trafficEventSource.onopen = () => {
 
@@ -11052,7 +11227,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       `;
 
       // Fetch live breaker status
-      fetch('/api/reliability/provider-nodes').then(r => r.json()).then(nodes => {
+      if (__gwAdminToken) fetch('/api/reliability/provider-nodes').then(r => r.json()).then(nodes => {
         const n = nodes.find(x => x.provider === prov);
         const state = (n && n.circuit_breaker && n.circuit_breaker.state) || 'CLOSED';
         const isFaulty = (state === 'OPEN') || (n && n.failure_injection && n.failure_injection.enabled);
@@ -12068,6 +12243,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     async function syncDlqDepthBadge() {
 
+      if (!__gwAdminToken) return;
+
       try {
 
         const res = await fetch('/v1/dlq');
@@ -12460,6 +12637,8 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function refreshVisualizeData() {
+
+      if (!__gwAdminToken) return;
 
       try {
 
@@ -14094,6 +14273,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     async function loadHistoryFromDB() {
 
+      if (!currentUser || currentUser.id === 'guest_user') {
+        const container = document.getElementById('chatsList');
+        if (container) container.innerHTML = '';
+        return;
+      }
+
       try {
 
         const res = await fetch('/api/chats');
@@ -14510,6 +14695,19 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function refreshChatsTable() {
+
+      if (!currentUser || currentUser.id === 'guest_user') {
+        allTableSessions = [];
+        const tbody = document.getElementById('chatsTableBody');
+        if (tbody) tbody.innerHTML = '';
+        const tableWrapper = document.getElementById('chatsTableWrapper');
+        if (tableWrapper) tableWrapper.classList.add('hidden');
+        const emptyContainer = document.getElementById('chatsTableEmpty');
+        if (emptyContainer) emptyContainer.classList.add('hidden');
+        const authRequired = document.getElementById('chatsAuthRequired');
+        if (authRequired) authRequired.classList.remove('hidden');
+        return;
+      }
 
       try {
 
@@ -15002,6 +15200,8 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function purgeAllChats() {
+
+      if (!currentUser || currentUser.id === 'guest_user') return;
 
       if (!confirm('Are you sure you want to delete ALL chat sessions? This action cannot be undone.')) return;
 
@@ -18301,6 +18501,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       updateAuthHeaderUI();
 
+      if (currentUser.id !== 'guest_user') loadHistoryFromDB();
+
       checkMailerStatus();
 
       if (currentView === 'chats') {
@@ -18850,6 +19052,8 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     async function checkMailerStatus() {
+
+      if (!__gwAdminToken) return;
 
       try {
 

@@ -2,14 +2,19 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
-import sqlite3
+from app.db import DATABASE_URL, sqlite3
+import threading
 import time
+import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from fastapi import HTTPException, status
+from prometheus_client import Counter, Histogram
 
 logger = logging.getLogger("llm_gateway.cost")
 logger.setLevel(logging.INFO)
@@ -22,6 +27,9 @@ if not logger.handlers:
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gateway.db")
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models.json")
+BUDGET_RESERVATIONS = Counter("gateway_budget_reservations_total", "Daily budget reservation outcomes", ("outcome",))
+BUDGET_COST_USD = Histogram("gateway_budget_cost_usd", "Estimated and settled request cost", ("kind",))
+CACHE_LOOKUPS = Counter("gateway_response_cache_lookups_total", "Response cache lookup outcomes", ("outcome", "backend"))
 
 
 def get_models_config() -> Dict[str, Any]:
@@ -53,10 +61,32 @@ def init_cost_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cost_key_ts ON cost_records(key_id, timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cost_alias ON cost_records(alias);")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS budget_accounts (
+            key_id TEXT PRIMARY KEY,
+            budget_date TEXT NOT NULL,
+            daily_budget REAL NOT NULL,
+            spent REAL NOT NULL DEFAULT 0,
+            reserved REAL NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS budget_reservations (
+            id TEXT PRIMARY KEY,
+            key_id TEXT NOT NULL,
+            key_name TEXT NOT NULL,
+            budget_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            status TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_budget_reservations_expiry ON budget_reservations(status, expires_at);")
 
     # Add daily_budget column to gateway_api_keys if missing
     try:
-        cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN daily_budget REAL DEFAULT 5.0")
+        cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN IF NOT EXISTS daily_budget REAL DEFAULT 5.0")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
@@ -106,7 +136,12 @@ class ResponseCache:
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
         self.default_ttl = default_ttl
         self._redis: Optional[aioredis.Redis] = None
-        self._local_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        self._local_cache: OrderedDict[str, Tuple[Dict[str, Any], float]] = OrderedDict()
+        self._local_cache_lock = threading.RLock()
+        self._local_cache_max_entries = 1000
+        self._local_cache_max_bytes = 16 * 1024 * 1024
+        self._local_cache_bytes = 0
+        self._local_cache_sizes: Dict[str, int] = {}
 
     def get_client(self) -> Optional[aioredis.Redis]:
         if self._redis is None:
@@ -128,18 +163,25 @@ class ResponseCache:
             try:
                 val = await r_client.get(f"cache:resp:{cache_key}")
                 if val:
+                    CACHE_LOOKUPS.labels("hit", "redis").inc()
                     return json.loads(val)
+                CACHE_LOOKUPS.labels("miss", "redis").inc()
+                return None
             except Exception as e:
                 logger.warning(f"Redis cache get failed ({e}), checking memory fallback.")
 
         # Local fallback
-        entry = self._local_cache.get(cache_key)
-        if entry:
-            data, expiry = entry
-            if time.time() < expiry:
-                return data
-            else:
+        with self._local_cache_lock:
+            entry = self._local_cache.get(cache_key)
+            if entry:
+                data, expiry = entry
+                if time.time() < expiry:
+                    self._local_cache.move_to_end(cache_key)
+                    CACHE_LOOKUPS.labels("hit", "local").inc()
+                    return data
                 self._local_cache.pop(cache_key, None)
+                self._local_cache_bytes -= self._local_cache_sizes.pop(cache_key, 0)
+        CACHE_LOOKUPS.labels("miss", "none").inc()
         return None
 
     async def set(self, cache_key: str, data: Dict[str, Any], ttl: Optional[int] = None) -> bool:
@@ -159,11 +201,35 @@ class ResponseCache:
                 logger.warning(f"Redis cache set failed ({e}), saving to memory fallback.")
 
         # Local fallback
-        self._local_cache[cache_key] = (data, time.time() + effective_ttl)
+        now = time.time()
+        payload_size = len(payload.encode("utf-8"))
+        with self._local_cache_lock:
+            if payload_size > self._local_cache_max_bytes:
+                return False
+            self._local_cache.pop(cache_key, None)
+            self._local_cache_bytes -= self._local_cache_sizes.pop(cache_key, 0)
+            while (len(self._local_cache) >= self._local_cache_max_entries
+                   or self._local_cache_bytes + payload_size > self._local_cache_max_bytes):
+                evicted_key, _ = self._local_cache.popitem(last=False)
+                self._local_cache_bytes -= self._local_cache_sizes.pop(evicted_key, 0)
+            self._local_cache[cache_key] = (data, now + effective_ttl)
+            self._local_cache_sizes[cache_key] = payload_size
+            self._local_cache_bytes += payload_size
         return True
 
-    def clear(self):
-        self._local_cache.clear()
+    async def clear(self):
+        with self._local_cache_lock:
+            self._local_cache.clear()
+            self._local_cache_sizes.clear()
+            self._local_cache_bytes = 0
+        r_client = self.get_client()
+        if r_client:
+            try:
+                keys = [key async for key in r_client.scan_iter(match="cache:resp:*")]
+                if keys:
+                    await r_client.delete(*keys)
+            except Exception as exc:
+                logger.warning("Redis response cache clear failed (%s)", type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -269,21 +335,178 @@ def calculate_request_cost(
     if output_price <= 0:
         output_price = 0.00000015
 
-    # Extract tokens or estimate from lengths
-    usage = token_usage or {}
-    prompt_tokens = usage.get("prompt_tokens")
-    completion_tokens = usage.get("completion_tokens")
-
-    if prompt_tokens is None or prompt_tokens <= 0:
-        msg_len = sum(len(m.get("content", "")) for m in (messages or []))
-        prompt_tokens = max(1, msg_len // 4)
-
-    if completion_tokens is None or completion_tokens <= 0:
-        completion_tokens = max(1, len(completion_text) // 4) if completion_text else 1
+    prompt_tokens, completion_tokens, _ = resolve_token_usage(token_usage, messages, completion_text)
 
     cost = (prompt_tokens * input_price) + (completion_tokens * output_price)
     # Strict safety floor: cost is always > 0
     return max(0.0000005, round(cost, 8))
+
+
+def resolve_token_usage(token_usage: Optional[Dict[str, Any]], messages: Optional[List[Dict[str, str]]],
+                        completion_text: str = "") -> Tuple[int, int, int]:
+    """Return provider usage or the same documented text-length estimates used for billing."""
+    usage = token_usage or {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    if prompt_tokens is None or int(prompt_tokens or 0) <= 0:
+        message_length = sum(len(str(message.get("content", ""))) for message in messages or [])
+        prompt_tokens = max(1, message_length // 4)
+    else:
+        prompt_tokens = int(prompt_tokens)
+    if completion_tokens is None or int(completion_tokens or 0) <= 0:
+        completion_tokens = max(1, len(completion_text) // 4) if completion_text else 1
+    else:
+        completion_tokens = int(completion_tokens)
+    total_tokens = usage.get("total_tokens")
+    if total_tokens is None or int(total_tokens or 0) <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    else:
+        total_tokens = int(total_tokens)
+    return prompt_tokens, completion_tokens, total_tokens
+
+
+def estimate_request_cost(alias: str, model: str, messages: List[Dict[str, str]], max_tokens: int) -> float:
+    prompt_tokens = max(1, sum(len(str(m.get("content", ""))) for m in messages or []) // 4)
+    return calculate_request_cost(
+        alias, model, {"prompt_tokens": prompt_tokens, "completion_tokens": max(1, int(max_tokens))}, messages
+    )
+
+
+def _database_epoch(cursor) -> float:
+    cursor.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp())" if DATABASE_URL else "SELECT (julianday('now') - 2440587.5) * 86400")
+    return float(cursor.fetchone()[0])
+
+
+def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount: float,
+                        reservation_id: str, lease_seconds: float) -> Tuple[bool, float]:
+    """Atomically reserve against a durable per-key daily account."""
+    if not math.isfinite(daily_budget) or daily_budget < 0 or not math.isfinite(amount) or amount <= 0:
+        raise ValueError("daily_budget must be non-negative and amount must be finite and positive")
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    try:
+        cursor = conn.cursor()
+        # Acquire SQLite's write lock before reading the balance. PostgreSQL
+        # serializes competing reservations on the account row UPDATE below.
+        if not DATABASE_URL:
+            cursor.execute("BEGIN IMMEDIATE")
+        now = _database_epoch(cursor)
+        day_start = datetime.fromtimestamp(now, timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        day = day_start.strftime("%Y-%m-%d")
+        start = day_start.timestamp()
+        cursor.execute(
+            "UPDATE budget_reservations SET status = 'expired' WHERE status = 'active' AND expires_at <= ? RETURNING key_id,budget_date,amount",
+            (now,),
+        )
+        expired = cursor.fetchall()
+        for expired_key, expired_day, expired_amount in expired:
+            cursor.execute(
+                "UPDATE budget_accounts SET reserved = CASE WHEN reserved > ? THEN reserved-? ELSE 0 END WHERE key_id = ? AND budget_date = ?",
+                (expired_amount, expired_amount, expired_key, expired_day),
+            )
+            BUDGET_RESERVATIONS.labels("expired").inc()
+        cursor.execute("SELECT COALESCE(SUM(cost_usd),0) FROM cost_records WHERE key_id = ? AND timestamp >= ?", (str(key_id), start))
+        existing_spend = float(cursor.fetchone()[0] or 0.0)
+        cursor.execute(
+            "INSERT INTO budget_accounts (key_id,budget_date,daily_budget,spent,reserved) VALUES (?,?,?,?,0) ON CONFLICT(key_id) DO NOTHING",
+            (str(key_id), day, float(daily_budget), existing_spend),
+        )
+        cursor.execute(
+            """UPDATE budget_accounts SET daily_budget = ?, budget_date = ?,
+                   spent = CASE WHEN budget_date = ? THEN spent ELSE ? END,
+                   reserved = CASE WHEN budget_date = ? THEN reserved + ? ELSE ? END
+               WHERE key_id = ? AND
+                   (CASE WHEN budget_date = ? THEN spent + reserved ELSE ? END) + ? <= ?
+               RETURNING spent, reserved""",
+            (daily_budget, day, day, existing_spend, day, amount, amount,
+             str(key_id), day, existing_spend, amount, daily_budget),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute("SELECT spent,reserved FROM budget_accounts WHERE key_id = ?", (str(key_id),))
+            current = cursor.fetchone()
+            conn.commit()
+            BUDGET_RESERVATIONS.labels("rejected").inc()
+            return False, float(current[0] + current[1]) if current else existing_spend
+        cursor.execute(
+            "INSERT INTO budget_reservations (id,key_id,key_name,budget_date,amount,status,expires_at,created_at) VALUES (?,?,?,?,?,'active',?,?)",
+            (reservation_id, str(key_id), key_name, day, amount, now + lease_seconds, now),
+        )
+        conn.commit()
+        BUDGET_RESERVATIONS.labels("reserved").inc()
+        BUDGET_COST_USD.labels("estimated").observe(amount)
+        return True, float(row[0] + row[1])
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def settle_budget_sync(reservation_id: str, actual_cost: float, key_id: str, key_name: str,
+                       alias: str, provider: str, model: str, prompt_tokens: int,
+                       completion_tokens: int, total_tokens: int) -> bool:
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    try:
+        cursor = conn.cursor()
+        now = _database_epoch(cursor)
+        reservation_expiry_now = "EXTRACT(EPOCH FROM clock_timestamp())" if DATABASE_URL else "?"
+        expiry_params = () if DATABASE_URL else (now,)
+        cursor.execute(
+            f"UPDATE budget_reservations SET status = 'settled' WHERE id = ? AND key_id = ? AND status = 'active' AND expires_at > {reservation_expiry_now} RETURNING key_id,budget_date,amount,created_at",
+            (reservation_id, str(key_id), *expiry_params),
+        )
+        reservation = cursor.fetchone()
+        if not reservation:
+            conn.rollback()
+            BUDGET_RESERVATIONS.labels("stale_settlement").inc()
+            return False
+        _, day, reserved, reserved_at = reservation
+        cursor.execute(
+            "UPDATE budget_accounts SET reserved = CASE WHEN reserved > ? THEN reserved-? ELSE 0 END, spent = spent+? WHERE key_id = ? AND budget_date = ?",
+            (reserved, reserved, actual_cost, str(key_id), day),
+        )
+        cursor.execute(
+            """INSERT INTO cost_records
+               (key_id,key_name,alias,provider,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,timestamp)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (str(key_id), key_name, alias, provider, model, prompt_tokens, completion_tokens,
+             total_tokens, actual_cost, reserved_at),
+        )
+        conn.commit()
+        BUDGET_RESERVATIONS.labels("settled").inc()
+        BUDGET_COST_USD.labels("actual").observe(actual_cost)
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def release_budget_sync(reservation_id: str, key_id: str) -> bool:
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE budget_reservations SET status = 'released' WHERE id = ? AND key_id = ? AND status = 'active' RETURNING budget_date,amount",
+            (reservation_id, str(key_id)),
+        )
+        reservation = cursor.fetchone()
+        if not reservation:
+            conn.rollback()
+            BUDGET_RESERVATIONS.labels("already_finalized").inc()
+            return False
+        day, amount = reservation
+        cursor.execute("UPDATE budget_accounts SET reserved = CASE WHEN reserved > ? THEN reserved-? ELSE 0 END WHERE key_id = ? AND budget_date = ?",
+                       (amount, amount, str(key_id), day))
+        conn.commit()
+        BUDGET_RESERVATIONS.labels("released").inc()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_cost_sync(
@@ -370,6 +593,41 @@ class CostTracker:
                 await pipe.execute()
             except Exception as e:
                 logger.warning(f"Redis cost counter increment failed: {e}")
+
+    async def reserve_budget(self, key_id: str, key_name: str, daily_budget: float, amount: float,
+                             lease_seconds: float = 120.0) -> Tuple[Optional[str], float]:
+        reservation_id = uuid.uuid4().hex
+        allowed, current = await asyncio.to_thread(
+            reserve_budget_sync, str(key_id), key_name, daily_budget, amount,
+            reservation_id, lease_seconds,
+        )
+        return (reservation_id if allowed else None), current
+
+    async def settle_budget(self, reservation_id: str, key_id: str, key_name: str, alias: str,
+                            provider: str, model: str, prompt_tokens: int,
+                            completion_tokens: int, total_tokens: int, actual_cost: float) -> bool:
+        settled = await asyncio.to_thread(
+            settle_budget_sync, reservation_id, actual_cost, str(key_id), key_name,
+            alias, provider, model, prompt_tokens, completion_tokens, total_tokens,
+        )
+        if settled:
+            self._total_cost_memory += actual_cost
+            r_client = self.get_client()
+            if r_client:
+                try:
+                    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    pipe = r_client.pipeline()
+                    pipe.incrbyfloat(f"cost:daily:{key_id}:{day}", actual_cost)
+                    pipe.expire(f"cost:daily:{key_id}:{day}", 86400 * 2)
+                    pipe.incrbyfloat(f"cost:alias:{alias}", actual_cost)
+                    pipe.incrbyfloat("cost:total:gateway", actual_cost)
+                    await pipe.execute()
+                except Exception as exc:
+                    logger.warning("Redis settled cost counter update failed: %s", type(exc).__name__)
+        return settled
+
+    async def release_budget(self, reservation_id: str, key_id: str) -> bool:
+        return await asyncio.to_thread(release_budget_sync, reservation_id, str(key_id))
 
     async def get_daily_spend(self, key_id: str) -> float:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

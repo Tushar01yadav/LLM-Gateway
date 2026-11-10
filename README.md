@@ -117,9 +117,10 @@ Applications that invoke upstream LLM providers directly encounter predictable s
 | **Security** | Gateway API keys, admin verification, sliding-window token bucket (Redis + memory fallback) | **Built** | `app/security.py` |
 | **Guardrails (heuristic)** | Prompt-injection pattern scan (NFKC/zero-width/control-normalized), SSRF private-IP blocker, hard-secret redaction, PII flagging without silent rewriting, system-prompt masking | **Built** | `app/guardrails.py`, `docs/security-findings.md` |
 | **Cost & Budget** | Per-model token calculation, daily budget caps, response caching, request coalescing | **Built** | `app/cost.py` |
-| **Async Jobs** | Background job queue (`/v1/jobs`), idempotency keys, Dead Letter Queue (DLQ) with `/replay` | **Built** | `app/jobs.py` |
+| **Async Jobs** | Database-backed leases and reconciliation, tenant-scoped idempotency, retries and DLQ replay | **Built** | `app/jobs.py`, `docs/async-jobs.md` |
 | **Observability** | Live visualizer dashboard and real-time Server-Sent Events (`/api/reliability/traffic-stream`) | **Built** | `app/main.py`, `/visualize` |
-| **Observability** | Prometheus metrics export & OpenTelemetry distributed tracing | Planned | Next iteration |
+| **Observability** | Prometheus HTTP metrics export & provisioned Grafana dashboard | **Built** | `/metrics`, `observability/` |
+| **Observability** | OpenTelemetry distributed tracing | Planned | Next iteration |
 
 ### Guardrail scope (heuristic baseline)
 
@@ -276,17 +277,24 @@ The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`
 docker compose up --build
 ```
 
-Starts the gateway, Redis, and a load generator. The load generator drives the
-built-in mock providers, so **no provider API keys are needed**: it checks
+Starts the gateway, Redis, Prometheus, Grafana, and a load generator. Prometheus
+scrapes the gateway's low-cardinality HTTP request metrics; Grafana provisions
+an overview dashboard for request rate, 5xx rate, latency percentiles, and
+in-flight requests. Both observability service ports are bound to localhost.
+Set `GRAFANA_ADMIN_PASSWORD` in `.env` to replace the local demo default. The
+dashboard can also be opened from the Observability page's **Prometheus & Grafana** tab.
+
+The load generator drives the built-in mock providers, so **no provider API keys are needed**: it checks
 health, sends a chat request, inspects the response headers, injects a 503 fault
 on `mock`, and confirms `mock_failover` serves the request from `mock2` with
-`X-Fallback-Used: true`. The dashboard is at `http://localhost:8000/visualize`
+`X-Fallback-Used: true`. The dashboard is at `http://localhost:18000/visualize`
 (open Settings and paste `demo-admin-token` to unlock admin panels).
+Prometheus is at `http://localhost:19090` and Grafana is at `http://localhost:13000`.
 Use `docker compose down -v` to remove the demo stack.
 
 ```bash
 # Example chat completion request
-curl -X POST http://localhost:8000/v1/chat \
+curl -X POST http://localhost:18000/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "model": "fast",
@@ -375,6 +383,8 @@ All routing chains, fallback targets, concurrency quotas, guardrail parameters, 
 ---
 
 ## Testing
+
+For the Python 3.10, PostgreSQL, Redis, focused test, and CI-equivalent setup, see [CI and local verification](docs/ci-testing.md).
 
 ```bash
 # Install test dependencies (pytest, pytest-asyncio)

@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY models.json .
+COPY scripts/migrate_sqlite_to_supabase.py ./scripts/migrate_sqlite_to_supabase.py
 
 # gateway.db is created at /app/gateway.db on first start. Mount a volume to persist it.
 RUN useradd --create-home --uid 10001 gateway \

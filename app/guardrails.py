@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import re
-import sqlite3
+from app.db import sqlite3
 import time
 import unicodedata
 import urllib.parse

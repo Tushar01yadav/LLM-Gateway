@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 import smtplib
-import sqlite3
+from app.db import sqlite3
 import time
 import uuid
 from email.mime.multipart import MIMEMultipart
@@ -613,7 +613,7 @@ def db_create_user(
             google_picture = COALESCE(excluded.google_picture, users.google_picture),
             picture = COALESCE(users.picture, excluded.picture),
             password_hash = COALESCE(excluded.password_hash, users.password_hash),
-            is_verified = MAX(users.is_verified, excluded.is_verified)
+            is_verified = CASE WHEN users.is_verified > excluded.is_verified THEN users.is_verified ELSE excluded.is_verified END
         """,
         (uid, clean_email, name.strip(), pw_hash, picture, google_pic, auth_provider, 1 if is_verified else 0),
     )

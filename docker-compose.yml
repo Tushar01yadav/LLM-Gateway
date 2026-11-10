@@ -16,6 +16,7 @@ services:
     build: .
     environment:
       APP_ENV: development
+      DATABASE_URL: ${DATABASE_URL:-}
       GATEWAY_ADMIN_TOKEN: demo-admin-token
       REDIS_URL: redis://redis:6379/0
       TRUSTED_PROXY_COUNT: "0"
@@ -24,7 +25,7 @@ services:
       OPENROUTER_API_KEY: ""
       GEMINI_API_KEY: ""
     ports:
-      - "8000:8000"
+      - "18000:8000"
     depends_on:
       redis:
         condition: service_healthy
@@ -34,6 +35,38 @@ services:
       timeout: 3s
       retries: 12
       start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-gateway-local}
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - "127.0.0.1:13000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
 
   loadgen:
     image: python:3.10-slim
@@ -47,3 +80,7 @@ services:
       gateway:
         condition: service_healthy
     restart: "no"
+
+volumes:
+  prometheus_data:
+  grafana_data:
