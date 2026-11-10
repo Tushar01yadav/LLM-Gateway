@@ -8,6 +8,7 @@ from app.db import DATABASE_URL, sqlite3
 import threading
 import time
 import uuid
+from decimal import Decimal
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -65,9 +66,9 @@ def init_cost_db():
         CREATE TABLE IF NOT EXISTS budget_accounts (
             key_id TEXT PRIMARY KEY,
             budget_date TEXT NOT NULL,
-            daily_budget REAL NOT NULL,
-            spent REAL NOT NULL DEFAULT 0,
-            reserved REAL NOT NULL DEFAULT 0
+            daily_budget NUMERIC(24,12) NOT NULL,
+            spent NUMERIC(24,12) NOT NULL DEFAULT 0,
+            reserved NUMERIC(24,12) NOT NULL DEFAULT 0
         )
     """)
     cursor.execute("""
@@ -76,13 +77,24 @@ def init_cost_db():
             key_id TEXT NOT NULL,
             key_name TEXT NOT NULL,
             budget_date TEXT NOT NULL,
-            amount REAL NOT NULL,
+            amount NUMERIC(24,12) NOT NULL,
             status TEXT NOT NULL,
             expires_at REAL NOT NULL,
             created_at REAL NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_budget_reservations_expiry ON budget_reservations(status, expires_at);")
+
+    if DATABASE_URL:
+        for table, column in (
+            ("budget_accounts", "daily_budget"),
+            ("budget_accounts", "spent"),
+            ("budget_accounts", "reserved"),
+            ("budget_reservations", "amount"),
+        ):
+            cursor.execute(
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE NUMERIC(24,12) USING {column}::NUMERIC(24,12)"
+            )
 
     # Add daily_budget column to gateway_api_keys if missing
     try:
@@ -387,6 +399,8 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
     """Atomically reserve against a durable per-key daily account."""
     if not math.isfinite(daily_budget) or daily_budget < 0 or not math.isfinite(amount) or amount <= 0:
         raise ValueError("daily_budget must be non-negative and amount must be finite and positive")
+    budget_value = str(Decimal(str(daily_budget)))
+    amount_value = str(Decimal(str(amount)))
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     try:
         cursor = conn.cursor()
@@ -413,7 +427,7 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
         existing_spend = float(cursor.fetchone()[0] or 0.0)
         cursor.execute(
             "INSERT INTO budget_accounts (key_id,budget_date,daily_budget,spent,reserved) VALUES (?,?,?,?,0) ON CONFLICT(key_id) DO NOTHING",
-            (str(key_id), day, float(daily_budget), existing_spend),
+            (str(key_id), day, budget_value, str(Decimal(str(existing_spend)))),
         )
         cursor.execute(
             """UPDATE budget_accounts SET daily_budget = ?, budget_date = ?,
@@ -422,8 +436,8 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
                WHERE key_id = ? AND
                    (CASE WHEN budget_date = ? THEN spent + reserved ELSE ? END) + ? <= ?
                RETURNING spent, reserved""",
-            (daily_budget, day, day, existing_spend, day, amount, amount,
-             str(key_id), day, existing_spend, amount, daily_budget),
+            (budget_value, day, day, str(Decimal(str(existing_spend))), day, amount_value, amount_value,
+             str(key_id), day, str(Decimal(str(existing_spend))), amount_value, budget_value),
         )
         row = cursor.fetchone()
         if row is None:
@@ -434,11 +448,11 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
             return False, float(current[0] + current[1]) if current else existing_spend
         cursor.execute(
             "INSERT INTO budget_reservations (id,key_id,key_name,budget_date,amount,status,expires_at,created_at) VALUES (?,?,?,?,?,'active',?,?)",
-            (reservation_id, str(key_id), key_name, day, amount, now + lease_seconds, now),
+            (reservation_id, str(key_id), key_name, day, amount_value, now + lease_seconds, now),
         )
         conn.commit()
         BUDGET_RESERVATIONS.labels("reserved").inc()
-        BUDGET_COST_USD.labels("estimated").observe(amount)
+        BUDGET_COST_USD.labels("estimated").observe(float(amount_value))
         return True, float(row[0] + row[1])
     except Exception:
         conn.rollback()

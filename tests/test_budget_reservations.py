@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,8 @@ import app.cost as cost
 def isolated_budget_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DATABASE_URL", "")
     monkeypatch.setattr(cost, "DATABASE_URL", "")
+    monkeypatch.setattr(db, "sqlite3", sqlite3)
+    monkeypatch.setattr(cost, "sqlite3", sqlite3)
     monkeypatch.setattr(cost, "DB_PATH", str(tmp_path / "budget.sqlite3"))
     conn = db.sqlite3.connect(str(tmp_path / "budget.sqlite3"))
     conn.execute("CREATE TABLE gateway_api_keys (id INTEGER PRIMARY KEY)")

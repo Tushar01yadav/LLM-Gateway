@@ -138,8 +138,8 @@ jobs:
         if: ${{ always() && !cancelled() }}
         env:
           DATABASE_URL: ""
-          GATEWAY_ADMIN_TOKEN: ci-full-regression
-          REDIS_URL: ""
+          GATEWAY_ADMIN_TOKEN: test-admin-token
+          REDIS_URL: redis://127.0.0.1:6379/15
           CIRCUIT_BREAKER_REDIS_URL: ""
           GATEWAY_TEST_DISABLE_REDIS: "1"
           GATEWAY_STARTUP_PROVIDER_SMOKE_TEST: "false"

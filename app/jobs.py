@@ -247,12 +247,12 @@ def init_jobs_db():
             attempt_count INTEGER NOT NULL DEFAULT 0,
             max_attempts INTEGER NOT NULL DEFAULT 3,
             lease_owner TEXT,
-            lease_expires_at REAL,
-            available_at REAL NOT NULL DEFAULT 0,
+            lease_expires_at DOUBLE PRECISION,
+            available_at DOUBLE PRECISION NOT NULL DEFAULT 0,
             replay_count INTEGER NOT NULL DEFAULT 0,
             cost_usd REAL DEFAULT 0.0,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL,
             UNIQUE(key_id, idempotency_key)
         )
     """)
@@ -260,9 +260,13 @@ def init_jobs_db():
     if DATABASE_URL:
         cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0")
         cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS lease_owner TEXT")
-        cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS lease_expires_at REAL")
-        cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS available_at REAL NOT NULL DEFAULT 0")
+        cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS lease_expires_at DOUBLE PRECISION")
+        cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS available_at DOUBLE PRECISION NOT NULL DEFAULT 0")
         cursor.execute("ALTER TABLE async_jobs ADD COLUMN IF NOT EXISTS replay_count INTEGER NOT NULL DEFAULT 0")
+        for column in ("lease_expires_at", "available_at", "created_at", "updated_at"):
+            cursor.execute(
+                f"ALTER TABLE async_jobs ALTER COLUMN {column} TYPE DOUBLE PRECISION USING {column}::DOUBLE PRECISION"
+            )
         cursor.execute("UPDATE async_jobs SET attempt_count = attempts WHERE attempt_count = 0 AND attempts > 0")
         _migrate_postgres_idempotency_scope(cursor)
     else:
