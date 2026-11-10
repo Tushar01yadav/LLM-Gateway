@@ -99,6 +99,9 @@ jobs:
           DATABASE_URL: ""
           GATEWAY_TEST_DATABASE_URL: ""
           GATEWAY_ADMIN_TOKEN: ci-sqlite-tests
+          REDIS_URL: ""
+          CIRCUIT_BREAKER_REDIS_URL: ""
+          GATEWAY_TEST_DISABLE_REDIS: "1"
         run: python -m pytest tests/test_budget_reservations.py tests/test_tracing.py tests/test_local_fallback_bounds.py tests/test_cost_cache.py -q
 
       - name: Stage C - initialize isolated PostgreSQL schema
@@ -115,7 +118,9 @@ jobs:
           GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway@127.0.0.1:5432/gateway_test
           GATEWAY_REQUIRE_POSTGRES_TESTS: "1"
           GATEWAY_ADMIN_TOKEN: ci-postgres-tests
-          REDIS_URL: redis://127.0.0.1:6379/15
+          REDIS_URL: ""
+          CIRCUIT_BREAKER_REDIS_URL: ""
+          GATEWAY_TEST_DISABLE_REDIS: "1"
         run: python -m pytest tests/test_budget_reservations.py tests/test_jobs_crash_safety.py -q
 
       - name: Stage D - Redis integration tests
@@ -134,6 +139,8 @@ jobs:
         env:
           DATABASE_URL: ""
           GATEWAY_ADMIN_TOKEN: ci-full-regression
-          REDIS_URL: redis://127.0.0.1:6379/15
-          CIRCUIT_BREAKER_REDIS_URL: redis://127.0.0.1:6379/14
+          REDIS_URL: ""
+          CIRCUIT_BREAKER_REDIS_URL: ""
+          GATEWAY_TEST_DISABLE_REDIS: "1"
+          GATEWAY_STARTUP_PROVIDER_SMOKE_TEST: "false"
         run: python -m pytest -q

@@ -971,6 +971,11 @@ class JobQueueManager:
             await self._requeue_job(job_id)
             self._current_job_id = None
 
+    async def aclose(self) -> None:
+        client, self._redis = self._redis, None
+        if client is not None:
+            await client.aclose()
+
     async def _worker_loop(self):
         logger.info(f"Async job worker started processing (owner={self._owner}).")
         while self._worker_running:

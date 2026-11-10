@@ -105,7 +105,7 @@ async def test_tracing_disabled_and_enabled_propagation_are_safe(monkeypatch):
         server_span = next(item for item in spans if item.name == "GET /trace-check")
         assert server_span.attributes.get("http.url") == "[REDACTED]"
         assert server_span.attributes.get("http.target") == "[REDACTED]"
-        assert server_span.attributes.get("http.request.header.authorization") == ["[REDACTED]"]
+        assert server_span.attributes.get("http.request.header.authorization") == ("[REDACTED]",)
         assert all("private" not in str(item.attributes) for item in spans)
         assert all(
             "private" not in str(event.attributes)

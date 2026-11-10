@@ -157,6 +157,11 @@ class ResponseCache:
                 self._redis = None
         return self._redis
 
+    async def aclose(self) -> None:
+        client, self._redis = self._redis, None
+        if client is not None:
+            await client.aclose()
+
     async def get(self, cache_key: str) -> Optional[Dict[str, Any]]:
         r_client = self.get_client()
         if r_client:
@@ -549,6 +554,11 @@ class CostTracker:
             except Exception:
                 self._redis = None
         return self._redis
+
+    async def aclose(self) -> None:
+        client, self._redis = self._redis, None
+        if client is not None:
+            await client.aclose()
 
     async def record_cost(
         self,

@@ -443,6 +443,11 @@ class CircuitBreaker:
         self._probe_expires_at = 0.0
         self._permit = None
 
+    async def aclose(self) -> None:
+        client, self._redis = self._redis, None
+        if client is not None:
+            await client.aclose()
+
     async def _complete_shared(self, outcome: str, permit: Dict[str, Any]) -> bool:
         try:
             if self._redis is None:
@@ -497,6 +502,11 @@ CIRCUIT_BREAKERS: Dict[str, CircuitBreaker] = {
 }
 
 MODEL_CIRCUIT_BREAKERS: Dict[str, CircuitBreaker] = {}
+
+
+async def close_circuit_breaker_clients() -> None:
+    breakers = list(CIRCUIT_BREAKERS.values()) + list(MODEL_CIRCUIT_BREAKERS.values())
+    await asyncio.gather(*(breaker.aclose() for breaker in breakers))
 
 
 def get_model_circuit_breaker(provider: str, model: str) -> CircuitBreaker:

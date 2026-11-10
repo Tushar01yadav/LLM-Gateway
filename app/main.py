@@ -106,6 +106,8 @@ from app.reliability import (
 
     run_startup_smoke_test,
 
+    close_circuit_breaker_clients,
+
 )
 
 from app.auth import (
@@ -775,6 +777,7 @@ async def lifespan(app: FastAPI):
 
     configure_tracing(app)
     worker_started = False
+    smoke_test_task = None
     try:
         check_deploy_config()
 
@@ -787,7 +790,10 @@ async def lifespan(app: FastAPI):
         await JOB_MANAGER.start_worker()
         worker_started = True
 
-        asyncio.create_task(run_startup_smoke_test())
+        if startup_provider_smoke_test_enabled():
+            smoke_test_task = asyncio.create_task(run_startup_smoke_test())
+        else:
+            logger.info("Provider connectivity smoke test is disabled; set GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true to run live inference checks.")
 
         yield
     finally:
@@ -795,6 +801,23 @@ async def lifespan(app: FastAPI):
             if worker_started:
                 await JOB_MANAGER.stop_worker()
         finally:
+            if smoke_test_task is not None and not smoke_test_task.done():
+                smoke_test_task.cancel()
+                try:
+                    await smoke_test_task
+                except asyncio.CancelledError:
+                    pass
+            cleanup = await asyncio.gather(
+                JOB_MANAGER.aclose(),
+                COST_TRACKER.aclose(),
+                RESPONSE_CACHE.aclose(),
+                RATE_LIMITER.aclose(),
+                close_circuit_breaker_clients(),
+                return_exceptions=True,
+            )
+            for error in cleanup:
+                if isinstance(error, Exception):
+                    logger.warning("Async resource shutdown failed (%s)", type(error).__name__)
             shutdown_tracing()
 
 app = FastAPI(
@@ -810,6 +833,10 @@ app = FastAPI(
     lifespan=lifespan,
 
 )
+
+
+def startup_provider_smoke_test_enabled() -> bool:
+    return os.getenv("GATEWAY_STARTUP_PROVIDER_SMOKE_TEST", "false").strip().lower() in ("1", "true", "yes", "on")
 
 HTTP_REQUESTS = Counter(
     "gateway_http_requests_total",
@@ -1106,6 +1133,8 @@ async def get_reliability_status(admin_auth: bool = Depends(verify_admin_auth)):
         "concurrency": get_concurrency_metrics(),
 
         "smoke_test": {
+
+            "enabled": startup_provider_smoke_test_enabled(),
 
             "failures": SMOKE_TEST_FAILURES,
 
@@ -1765,15 +1794,15 @@ async def handle_google_callback(request: GoogleCallbackRequest, response: Respo
 
     token_uri = GOOGLE_CONFIG.get("token_uri", "https://oauth2.googleapis.com/token")
 
-    if not client_id or not client_secret:
-
-        raise HTTPException(status_code=500, detail="Google credentials not configured.")
-
     code_verifier = await asyncio.to_thread(db_consume_oauth_state, request.state.strip())
 
     if not code_verifier:
 
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state. Please sign in again.")
+
+    if not client_id or not client_secret:
+
+        raise HTTPException(status_code=500, detail="Google credentials not configured.")
 
     async with httpx.AsyncClient(timeout=15.0) as client:
 

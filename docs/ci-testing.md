@@ -1,6 +1,8 @@
 # CI and local verification
 
-CI runs on Python 3.10 with PostgreSQL 16 and Redis 7.4 service containers. Each GitHub Actions run receives fresh service containers; tests use `gateway_test` for PostgreSQL and Redis databases 14 and 15 for integration and application traffic. CI uses disposable credentials and does not connect to production services.
+CI runs on Python 3.10 with PostgreSQL 16 and Redis 7.4 service containers. Each GitHub Actions run receives fresh service containers; PostgreSQL and Redis behavior is verified in their dedicated integration stages using disposable databases. The full regression suite uses local fallbacks and deterministic mocks. No provider API keys are required, and that suite does not call live LLM providers.
+
+Provider startup smoke tests make live inference requests and are disabled by default. To run them explicitly, set `GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true` and configure the provider API keys in the environment. A passing application test or CI integration stage verifies gateway behavior, not external provider availability; live smoke results are the only checks that verify real provider connectivity and inference.
 
 ## Install and static checks
 
@@ -56,13 +58,15 @@ pytest tests/test_circuit_breakers.py tests/test_jobs_crash_safety.py -q
 
 ## Full regression suite
 
-With the test-only admin token set, run the full suite against SQLite and local Redis:
+With the test-only admin token set, run the full suite against SQLite with Redis-backed application clients disabled. Real Redis behavior is covered by the separate Redis integration command above:
 
 ```powershell
 $env:GATEWAY_ADMIN_TOKEN = 'local-test-only'
 $env:DATABASE_URL = ''
-$env:REDIS_URL = 'redis://127.0.0.1:6379/15'
-$env:CIRCUIT_BREAKER_REDIS_URL = 'redis://127.0.0.1:6379/14'
+$env:REDIS_URL = ''
+$env:CIRCUIT_BREAKER_REDIS_URL = ''
+$env:GATEWAY_TEST_DISABLE_REDIS = '1'
+$env:GATEWAY_STARTUP_PROVIDER_SMOKE_TEST = 'false'
 pytest -q
 ```
 

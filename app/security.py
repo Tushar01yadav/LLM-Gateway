@@ -377,6 +377,11 @@ class RedisTokenBucketRateLimiter:
                     self._last_redis_fail = now
             return self._redis_client
 
+    async def aclose(self) -> None:
+        client, self._redis_client = self._redis_client, None
+        if client is not None:
+            await client.aclose()
+
     async def check_rate_limit(self, key_id: Any, quota_rpm: int, cost: float = 1.0) -> Tuple[bool, int, float]:
         """
         Token-bucket evaluation. `key_id` is a bucket key such as "key:12",
