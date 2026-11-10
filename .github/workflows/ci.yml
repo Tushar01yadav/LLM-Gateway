@@ -99,7 +99,7 @@ jobs:
           DATABASE_URL: ""
           GATEWAY_TEST_DATABASE_URL: ""
           GATEWAY_ADMIN_TOKEN: ci-sqlite-tests
-        run: pytest tests/test_budget_reservations.py tests/test_tracing.py tests/test_local_fallback_bounds.py tests/test_cost_cache.py -q
+        run: python -m pytest tests/test_budget_reservations.py tests/test_tracing.py tests/test_local_fallback_bounds.py tests/test_cost_cache.py -q
 
       - name: Stage C - initialize isolated PostgreSQL schema
         if: ${{ always() && !cancelled() }}
@@ -116,7 +116,7 @@ jobs:
           GATEWAY_REQUIRE_POSTGRES_TESTS: "1"
           GATEWAY_ADMIN_TOKEN: ci-postgres-tests
           REDIS_URL: redis://127.0.0.1:6379/15
-        run: pytest tests/test_budget_reservations.py tests/test_jobs_crash_safety.py -q
+        run: python -m pytest tests/test_budget_reservations.py tests/test_jobs_crash_safety.py -q
 
       - name: Stage D - Redis integration tests
         if: ${{ always() && !cancelled() }}
@@ -127,7 +127,7 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379/15
           CIRCUIT_TEST_REDIS_URL: redis://127.0.0.1:6379/14
           CIRCUIT_BREAKER_REDIS_URL: redis://127.0.0.1:6379/14
-        run: pytest tests/test_circuit_breakers.py tests/test_jobs_crash_safety.py -q
+        run: python -m pytest tests/test_circuit_breakers.py tests/test_jobs_crash_safety.py -q
 
       - name: Stage E - full regression suite
         if: ${{ always() && !cancelled() }}
@@ -136,4 +136,4 @@ jobs:
           GATEWAY_ADMIN_TOKEN: ci-full-regression
           REDIS_URL: redis://127.0.0.1:6379/15
           CIRCUIT_BREAKER_REDIS_URL: redis://127.0.0.1:6379/14
-        run: pytest -q
+        run: python -m pytest -q
