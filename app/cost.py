@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+from app import db
 from app.db import DATABASE_URL, sqlite3
 import threading
 import time
@@ -85,7 +86,7 @@ def init_cost_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_budget_reservations_expiry ON budget_reservations(status, expires_at);")
 
-    if DATABASE_URL:
+    if db.DATABASE_URL:
         for table, column in (
             ("budget_accounts", "daily_budget"),
             ("budget_accounts", "spent"),
@@ -107,11 +108,16 @@ def init_cost_db():
             )
 
     # Add daily_budget column to gateway_api_keys if missing
-    try:
-        cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN IF NOT EXISTS daily_budget REAL DEFAULT 5.0")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Column already exists
+    if db.DATABASE_URL:
+        cursor.execute("SELECT to_regclass('llm_gateway.gateway_api_keys')")
+        row = cursor.fetchone()
+        if row and row[0]:
+            cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN IF NOT EXISTS daily_budget REAL DEFAULT 5.0")
+    else:
+        cursor.execute("PRAGMA table_info(gateway_api_keys)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if columns and "daily_budget" not in columns:
+            cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN daily_budget REAL DEFAULT 5.0")
 
     conn.commit()
     conn.close()

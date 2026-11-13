@@ -6,7 +6,8 @@ import logging
 import math
 import os
 import secrets
-from app.db import sqlite3
+from app import db
+from app.db import DATABASE_URL, sqlite3
 import sys
 import threading
 import time
@@ -182,10 +183,13 @@ def init_security_db():
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_gw_key_hash ON gateway_api_keys(key_hash);")
-    try:
+    if db.DATABASE_URL:
         cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN IF NOT EXISTS daily_budget REAL DEFAULT 5.0")
-    except sqlite3.OperationalError:
-        pass
+    else:
+        cursor.execute("PRAGMA table_info(gateway_api_keys)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "daily_budget" not in columns:
+            cursor.execute("ALTER TABLE gateway_api_keys ADD COLUMN daily_budget REAL DEFAULT 5.0")
     conn.commit()
     conn.close()
 
