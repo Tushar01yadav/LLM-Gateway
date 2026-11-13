@@ -6,6 +6,16 @@ import pytest
 os.environ.setdefault("GATEWAY_ADMIN_TOKEN", "test-admin-token")
 os.environ.setdefault("APP_ENV", "development")
 
+# Never let a developer's .env point the test suite at a remote database.
+# CI sets DATABASE_URL explicitly for Stage C, and setdefault() preserves it;
+# here the default prevents load_dotenv() from injecting a live URL into
+# imports such as app.security, which initialize their schema on import.
+os.environ.setdefault("DATABASE_URL", "")
+
+# Breakers inherit REDIS_URL when this is unset, which makes timing-sensitive
+# unit tests wait on an unreachable Redis. Stage D sets the URL explicitly.
+os.environ.setdefault("CIRCUIT_BREAKER_REDIS_URL", "")
+
 # Keep test jobs/cache/limiter keys out of the dev Redis database (db 0) so a
 # locally running server cannot consume work enqueued by the test suite.
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
