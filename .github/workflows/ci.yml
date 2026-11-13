@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, ci-reliability-verification]
+    branches: [main, ci-reliability-verification, multi-instance-reliability]
   pull_request:
 
 jobs:
@@ -144,3 +144,16 @@ jobs:
           GATEWAY_TEST_DISABLE_REDIS: "1"
           GATEWAY_STARTUP_PROVIDER_SMOKE_TEST: "false"
         run: python -m pytest -q
+
+  multi-instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage F - two-process PostgreSQL and Redis reliability tests
+        run: docker compose -f docker-compose.multi-instance.yml up --build --abort-on-container-exit --exit-code-from verifier
+
+      - name: Stop and remove isolated test services
+        if: ${{ always() }}
+        run: docker compose -f docker-compose.multi-instance.yml down --volumes --remove-orphans

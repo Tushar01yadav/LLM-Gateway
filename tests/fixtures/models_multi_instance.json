@@ -1,0 +1,52 @@
+{
+  "circuit_breakers": {
+    "failure_threshold": 2,
+    "recovery_timeout_seconds": 60,
+    "probe_lease_seconds": 2,
+    "count_429": true,
+    "providers": {
+      "mock": {
+        "failure_threshold": 2,
+        "recovery_timeout_seconds": 60,
+        "probe_lease_seconds": 2
+      }
+    }
+  },
+  "guardrails": {
+    "enabled": true,
+    "block_on_pii": false,
+    "max_payload_bytes": 1048576,
+    "max_tokens": 32000,
+    "system_prompts": []
+  },
+  "rate_limiting": {
+    "enabled": true,
+    "redis_fail_closed": true,
+    "default_quota_rpm": 60,
+    "burst_capacity": 60
+  },
+  "cost_control": {
+    "cache_enabled": false,
+    "cache_ttl_sec": 60,
+    "coalescing_enabled": false,
+    "default_daily_budget_usd": 10.0
+  },
+  "concurrency": {
+    "global_max_inflight": 120,
+    "providers": {
+      "mock": {
+        "max_inflight": 100,
+        "max_queue_size": 100,
+        "max_queue_wait_sec": 5.0
+      }
+    }
+  },
+  "mock": {
+    "provider": "mock",
+    "model": "mock-multi-instance",
+    "fallback": [],
+    "input_price_per_token": 1.0,
+    "output_price_per_token": 1.0,
+    "context_limit": 32000
+  }
+}

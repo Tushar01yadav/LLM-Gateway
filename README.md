@@ -6,6 +6,8 @@ LLM Gateway routes chat requests to configured providers through one API. It inc
 
 **60-second demo:** [docs/demo.md](docs/demo.md).
 
+Multi-process PostgreSQL/Redis verification topology, guarantees, and limitations: [docs/multi-instance-reliability.md](docs/multi-instance-reliability.md).
+
 ---
 
 ## Architecture
