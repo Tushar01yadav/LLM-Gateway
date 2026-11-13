@@ -38,7 +38,7 @@ host-bound; see `docs/benchmarks/phase4-load-before-after.md` for measured host 
 | Identity/tenancy and takeover fixes hold (key hashing, owner-scoped jobs, trusted proxy) | `cd scratch/audit-run && python ../phase3_probe.py` (imports phase2, which includes phase1 probes) | 129/129 live probes (85 Phase 1+2, 44 Phase 3), exit 0 | 2026-11-05 |
 | Dashboard scripts are pinned and SRI-enforced | `python -m pytest tests/test_dashboard_supply_chain.py -q` | 3 passed; no remote `<script src>`; all three vendored files match their `sha384` integrity attributes | 2026-11-05 |
 | Dashboard loads under SRI in a real browser | Open `http://127.0.0.1:<port>/visualize` (vendored assets) and inspect console | `window.tailwind`, `window.marked`, `window.DOMPurify` present; no integrity/CORS errors; only expected 401 for `/api/chats` (guest) | 2026-11-05 |
-| Chat responses expose public metadata headers only | `curl -D - -X POST .../v1/chat -d '{"model":"mock",...}'` | `X-Request-Id`, `X-Provider`, `X-Model`, `X-Fallback-Used`, `X-Latency-Ms`, `X-Cost-USD` present; no internal headers exposed (e.g. `X-Latency-Ms: 1533.61`, `X-Cost-USD: 0.00000065`) | 2026-11-05 |
+| Chat responses expose public metadata headers only | `curl -D - -X POST .../v1/chat -d '{"model":"mock",...}'` | `X-Request-Id`, `X-Provider`, `X-Model`, `X-Fallback-Used`, `X-Latency-Ms`, `X-Cost-USD` present (plus `X-Guest-ID` on guest requests); no internal headers exposed | 2026-11-05 |
 | Visualizer chaos panel works in a live browser (kill, latency, Redis down/up) | Start server with `GATEWAY_ALLOW_CHAOS=1` and open `/visualize` | kill mock -> chat `502` with `server_error_503 x3`; unbreak -> `200`; 1500 ms injection -> chat 1.66 s / `x-latency-ms 1533.61`; reset -> 0.65 s / `525.31` ms; Redis down -> container `exited` while `/health` and chat stay `200`; Redis up -> container `Up`, chat 0.65 s. Unauthenticated chaos calls return 403. Evidence: `docs/benchmarks/quickwins-chaos-ui.json` | 2026-11-05 |
 | `docker compose up --build` runs a no-key demo from a clean copy | Copy repo without `.env`/`gateway.db`/`scratch`, then `docker compose up --build --exit-code-from loadgen` | 12/12 `[PASS]`, exit 0; `mock_failover` during injected mock outage served by `mock2` with `X-Fallback-Used: true`; log: `scratch/compose-demo-run.log` | 2026-11-05 |
 | CI job steps pass on a clean copy (pytest + `node --check`) | Same commands as `.github/workflows/ci.yml` run in a copy without `.env`: explicit `node --check` on 3 inline script blocks, then `python -m pytest -q` with Redis db 15 | `node --check passed for 3 block(s)`; `113 passed, 2 skipped` (live-provider tests skip without keys) | 2026-11-05 |
@@ -63,9 +63,10 @@ host-bound; see `docs/benchmarks/phase4-load-before-after.md` for measured host 
 - `tests/test_owasp_guardrails.py::test_owasp_auth_bypass_prevention`
 - `tests/test_security_wall.py::test_chat_pipeline_auth_rejections`
 
-Both originally asserted 401 for a missing credential. The product decision in
-`e74cf56` allows instant anonymous chat under a per-IP guest quota, so they now
-assert 200 for the guest path and keep the 401 assertions for invalid and revoked
+Both originally asserted 401 for a missing credential. The product decision
+allows instant anonymous chat under an isolated guest quota (identified and isolated
+via HMAC-signed guest tokens and separate budget accounts, rather than raw per-IP sharing),
+so they now assert 200 for the guest path and keep the 401 assertions for invalid and revoked
 keys. This matches the code rather than hiding the mismatch.
 
 ## Fresh-clone test setup
