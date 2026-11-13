@@ -1409,6 +1409,11 @@ async def create_async_job(
         else:
             raise HTTPException(status_code=401, detail="Unauthorized: Missing Gateway API key")
 
+    # Same OWASP LLM10 body cap the synchronous /v1/chat path applies. Checked
+    # here so oversized submissions are rejected before a job row is queued.
+    raw_content_len = int(request_http.headers.get("content-length") or 0)
+    GUARDRAILS.enforce_payload_size(raw_content_len)
+
     effective_idempotency = idempotency_key or x_idempotency_key
     requested_max_tokens = request.max_tokens if request.max_tokens is not None else 1000
     payload_dict = {

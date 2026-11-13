@@ -575,6 +575,11 @@ class JobQueueManager:
         key_id = str(key_id)
         max_attempts = max(1, min(int(max_attempts), JOBS_MAX_ATTEMPTS))
 
+        # Enforce OWASP LLM10 before the row is persisted so every enqueue
+        # path, not just the HTTP route, shares the same byte budget.
+        payload_json = json.dumps(payload)
+        GUARDRAILS.enforce_payload_size(len(payload_json.encode("utf-8")))
+
         def _existing_by_idempotency(cursor) -> Optional[Dict[str, Any]]:
             cursor.execute(
                 """SELECT id, status, payload, result, error, attempts, max_attempts, cost_usd, created_at
@@ -618,7 +623,6 @@ class JobQueueManager:
         # 2. Insert new job. The composite UNIQUE index is the source of truth:
         # if two concurrent requests pass the SELECT above, one INSERT loses and
         # we return the winner's job instead of double-enqueueing.
-        payload_json = json.dumps(payload)
         try:
             cursor.execute("""
                 INSERT INTO async_jobs (id, idempotency_key, key_id, key_name, status, payload, attempts, attempt_count, max_attempts, available_at, created_at, updated_at)

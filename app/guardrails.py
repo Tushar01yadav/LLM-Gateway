@@ -158,6 +158,17 @@ class GuardrailsEngine:
         self.block_on_pii = cfg.get("block_on_pii", False)
         self.system_prompts: List[str] = cfg.get("system_prompts", [])
 
+    def enforce_payload_size(self, size_bytes: int) -> None:
+        """Reject bodies above the configured OWASP LLM10 byte budget."""
+        if self.enabled and size_bytes > self.max_body_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Payload size {size_bytes} bytes exceeds maximum allowed "
+                    f"limit of {self.max_body_bytes} bytes (OWASP LLM10)."
+                ),
+            )
+
     def inspect_input(
         self,
         messages: List[Dict[str, str]],
