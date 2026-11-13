@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import uuid
 import pytest
 from app import db, cost, security
 from app.db import _translate_sql
@@ -206,3 +207,90 @@ def test_postgres_sql_translation_and_behavior(monkeypatch):
 
     # PRAGMA is filtered out on PostgreSQL
     assert _translate_sql("PRAGMA table_info(gateway_api_keys)") is None
+
+
+def test_postgres_legacy_daily_budget_migration_and_preservation():
+    """
+    Verify PostgreSQL path migrates legacy gateway_api_keys lacking daily_budget,
+    preserves existing keys, and ensures validate_gateway_api_key returns daily_budget.
+    """
+    if not db.DATABASE_URL or not os.getenv("GATEWAY_TEST_DATABASE_URL"):
+        if os.getenv("GATEWAY_REQUIRE_POSTGRES_TESTS") == "1":
+            pytest.fail("PostgreSQL integration is required but DATABASE_URL/GATEWAY_TEST_DATABASE_URL is missing")
+        pytest.skip("dedicated PostgreSQL integration service is not configured")
+    if db.DATABASE_URL != os.getenv("GATEWAY_TEST_DATABASE_URL"):
+        pytest.fail("DATABASE_URL must match the dedicated GATEWAY_TEST_DATABASE_URL")
+
+    # Connect to PostgreSQL and create legacy table without daily_budget
+    conn = db.sqlite3.connect()
+    try:
+        conn.execute("DROP TABLE IF EXISTS llm_gateway.gateway_api_keys CASCADE")
+        conn.execute("""
+            CREATE TABLE llm_gateway.gateway_api_keys (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                key_hash TEXT UNIQUE NOT NULL,
+                prefix TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                quota INTEGER NOT NULL DEFAULT 60,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gw_key_hash ON llm_gateway.gateway_api_keys(key_hash)")
+
+        # Seed legacy active key
+        raw_key = f"gw_live_pglegacy_{uuid.uuid4().hex}"
+        key_hash = security.hash_api_key(raw_key)
+        prefix = f"{raw_key[:12]}...{raw_key[-4:]}"
+        conn.execute(
+            "INSERT INTO llm_gateway.gateway_api_keys (name, key_hash, prefix, status, quota) VALUES (%s, %s, %s, 'active', 75)",
+            ("PG Legacy Client", key_hash, prefix),
+        )
+        conn.commit()
+
+        # Verify daily_budget is not yet present
+        cols_pre = [
+            row[0] for row in conn.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_schema = 'llm_gateway' AND table_name = 'gateway_api_keys'"""
+            ).fetchall()
+        ]
+        assert "daily_budget" not in cols_pre
+    finally:
+        conn.close()
+
+    # Run initialization / migration on PostgreSQL
+    security.init_security_db()
+    cost.init_cost_db()
+
+    # Verify column daily_budget is present
+    conn = db.sqlite3.connect()
+    try:
+        cols_post = [
+            row[0] for row in conn.execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_schema = 'llm_gateway' AND table_name = 'gateway_api_keys'"""
+            ).fetchall()
+        ]
+        assert "daily_budget" in cols_post
+    finally:
+        conn.close()
+
+    # Verify legacy key authenticates and has default daily_budget = 5.0
+    key_info = security.validate_gateway_api_key(raw_key)
+    assert key_info is not None
+    assert key_info["name"] == "PG Legacy Client"
+    assert key_info["quota"] == 75
+    assert key_info["status"] == "active"
+    assert key_info["daily_budget"] == 5.0
+
+    # Verify creating key with custom daily_budget on PostgreSQL works
+    raw_key2, info2 = security.create_gateway_api_key("PG Fresh Key", quota=150, daily_budget=20.0)
+    assert info2["daily_budget"] == 20.0
+    val2 = security.validate_gateway_api_key(raw_key2)
+    assert val2 is not None
+    assert val2["daily_budget"] == 20.0
+
+    # Verify idempotency on PostgreSQL
+    security.init_security_db()
+    cost.init_cost_db()
