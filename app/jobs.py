@@ -547,10 +547,11 @@ class JobQueueManager:
             try:
                 self._redis = aioredis.from_url(
                     self.redis_url,
-                    socket_connect_timeout=0.5,
+                    socket_connect_timeout=2.0,
                     # Must exceed the BLMOVE timeout below, otherwise the client
                     # can time out after Redis already moved the job and lose it.
                     socket_timeout=5.0,
+                    health_check_interval=30,
                     decode_responses=True,
                 )
             except Exception:

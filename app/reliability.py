@@ -205,7 +205,12 @@ class CircuitBreaker:
                 token = uuid.uuid4().hex
                 try:
                     if self._redis is None:
-                        self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                        self._redis = Redis.from_url(
+                            self.redis_url,
+                            decode_responses=True,
+                            socket_connect_timeout=2.0,
+                            socket_timeout=1.0,
+                        )
                     result = await self._redis.eval(_CB_ACQUIRE_LUA, 1, self.key, self.failure_threshold,
                         int(self.cooldown_seconds * 1000), int(self.probe_lease_seconds * 1000), token)
                     allowed, reason, version, owner, state, previous_state, open_until_ms, probe_owner, probe_expires_ms, server_now_ms = result
@@ -404,7 +409,12 @@ class CircuitBreaker:
         if self.redis_url and Redis:
             try:
                 if self._redis is None:
-                    self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                    self._redis = Redis.from_url(
+                        self.redis_url,
+                        decode_responses=True,
+                        socket_connect_timeout=2.0,
+                        socket_timeout=1.0,
+                    )
                 values = await self._redis.hgetall(self.key)
                 if values:
                     state = values.get("state", "CLOSED")
@@ -451,7 +461,12 @@ class CircuitBreaker:
     async def _complete_shared(self, outcome: str, permit: Dict[str, Any]) -> bool:
         try:
             if self._redis is None:
-                self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                self._redis = Redis.from_url(
+                    self.redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=1.0,
+                )
             version, token = permit["version"], permit["token"]
             result = await self._redis.eval(_CB_COMPLETE_LUA, 1, self.key, version, token, outcome,
                 self.failure_threshold, int(self.cooldown_seconds * 1000))
@@ -486,7 +501,12 @@ class CircuitBreaker:
         if self.redis_url and Redis:
             try:
                 if self._redis is None:
-                    self._redis = Redis.from_url(self.redis_url, decode_responses=True)
+                    self._redis = Redis.from_url(
+                        self.redis_url,
+                        decode_responses=True,
+                        socket_connect_timeout=2.0,
+                        socket_timeout=1.0,
+                    )
                 await self._redis.delete(self.key)
             except RedisError as exc:
                 logger.error("Circuit reset could not reach Redis provider=%s error=%s", self.name, type(exc).__name__)

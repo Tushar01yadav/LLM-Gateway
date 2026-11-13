@@ -356,7 +356,7 @@ class RedisTokenBucketRateLimiter:
 
     async def get_client(self) -> Optional[aioredis.Redis]:
         now = time.time()
-        if now - self._last_redis_fail < 10.0:
+        if now - self._last_redis_fail < 1.0:
             return None
 
         cfg = get_security_config()
@@ -368,8 +368,11 @@ class RedisTokenBucketRateLimiter:
                         redis_url,
                         encoding="utf-8",
                         decode_responses=True,
-                        socket_timeout=0.5,
-                        socket_connect_timeout=0.5,
+                        # Under concurrent load, TCP setup in a container network
+                        # measured up to ~0.43s; 0.5s rejected healthy connections.
+                        socket_connect_timeout=2.0,
+                        socket_timeout=1.0,
+                        health_check_interval=30,
                     )
                 except Exception as e:
                     logger.error(f"[SECURITY] Failed to initialize Redis client: {e}")

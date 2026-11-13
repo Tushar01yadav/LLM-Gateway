@@ -73,3 +73,65 @@ async def test_rate_limiter_uses_redis_again_after_recovery(monkeypatch):
     available = True
     assert (await limiter.check_rate_limit("same-key", 5))[0] is True
     assert limiter._mem_buckets["same-key"]["tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_fails_closed_on_transient_connect_error_and_recovers(monkeypatch):
+    limiter = security.RedisTokenBucketRateLimiter()
+    monkeypatch.setattr(security, "get_security_config", lambda: {"enabled": True})
+    monkeypatch.setattr(security, "rate_limit_fail_closed", lambda: True)
+    healthy = False
+
+    class FlakyRedis:
+        async def eval(self, *args):
+            if not healthy:
+                raise ConnectionError("Timeout connecting to server")
+            return [1, 0, 99]
+
+    async def client():
+        return FlakyRedis()
+
+    monkeypatch.setattr(limiter, "get_client", client)
+    assert await limiter.check_rate_limit("bucket", quota_rpm=100) == (False, 5, 0.0)
+    healthy = True
+    assert await limiter.check_rate_limit("bucket", quota_rpm=100) == (True, 0, 99.0)
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_redis_client_uses_load_tolerant_timeouts(monkeypatch):
+    captured = {}
+
+    class DummyClient:
+        async def aclose(self):
+            pass
+
+    def fake_from_url(url, **kwargs):
+        captured.update(kwargs)
+        return DummyClient()
+
+    monkeypatch.setattr(security.aioredis, "from_url", fake_from_url)
+    limiter = security.RedisTokenBucketRateLimiter()
+    assert await limiter.get_client() is not None
+    assert captured["socket_connect_timeout"] >= 2.0
+    assert captured["socket_timeout"] >= 1.0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rate_limit_checks_with_redis_latency_are_not_rejected(monkeypatch):
+    limiter = security.RedisTokenBucketRateLimiter()
+    monkeypatch.setattr(security, "get_security_config", lambda: {"enabled": True})
+    monkeypatch.setattr(security, "rate_limit_fail_closed", lambda: True)
+
+    class SlowRedis:
+        async def eval(self, *args):
+            await asyncio.sleep(0.05)
+            return [1, 0, 50]
+
+    async def client():
+        return SlowRedis()
+
+    monkeypatch.setattr(limiter, "get_client", client)
+    results = await asyncio.gather(*(
+        limiter.check_rate_limit(f"concurrent-{index}", quota_rpm=100) for index in range(100)
+    ))
+    assert all(result[0] for result in results)

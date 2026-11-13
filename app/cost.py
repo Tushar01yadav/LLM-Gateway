@@ -170,8 +170,9 @@ class ResponseCache:
             try:
                 self._redis = aioredis.from_url(
                     self.redis_url,
-                    socket_connect_timeout=0.5,
-                    socket_timeout=0.5,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=1.0,
+                    health_check_interval=30,
                     decode_responses=True,
                 )
             except Exception as e:
@@ -575,8 +576,9 @@ class CostTracker:
             try:
                 self._redis = aioredis.from_url(
                     self.redis_url,
-                    socket_connect_timeout=0.5,
-                    socket_timeout=0.5,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=1.0,
+                    health_check_interval=30,
                     decode_responses=True,
                 )
             except Exception:
