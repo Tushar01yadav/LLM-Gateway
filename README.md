@@ -270,8 +270,11 @@ docker run --rm -p 8000:8000 \
 ```
 
 The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`.
-`gateway.db` is created inside the container; mount a volume at `/app` (or
-`/app/gateway.db`) to persist sessions, keys, and logs across restarts.
+`gateway.db` is created inside the container at `/app/gateway.db`. To persist
+sessions, keys, and logs across restarts, mount a volume specifically for the database
+file (e.g. `-v llm_gateway_db:/app/gateway.db` or `-v $(pwd)/gateway.db:/app/gateway.db`).
+**Never mount a host directory over `/app`**, as doing so shadows and masks the application
+code built into the container image.
 
 ### 5. One-command demo (Docker Compose)
 
@@ -307,14 +310,17 @@ curl -X POST http://localhost:18000/v1/chat \
 ```
 
 Anonymous callers are a supported guest path: `/v1/chat` without an API key or
-session cookie is served under a per-IP guest quota. Invalid or revoked keys are
-still rejected with `401`.
+session cookie automatically receives an HMAC-signed guest token (`llm_gateway_guest` cookie
+and `X-Guest-ID` header) with an isolated budget account and rate limit bucket (`guest:<id>`).
+Invalid or revoked keys are still rejected with `401`.
 
 ---
 
 ## Configuration (`models.json`)
 
-All routing chains, fallback targets, concurrency quotas, guardrail parameters, and token prices are centrally defined in `models.json`. **No model names or prices are hardcoded in application logic.**
+All routing chains, fallback targets, concurrency quotas, guardrail parameters, and token prices are centrally defined in `models.json`. The configuration file serves as the single source of truth for routing and costing; safe baseline pricing fallbacks are retained in `app/cost.py` only to ensure no valid request ever logs a zero-dollar path.
+
+When requests are submitted using an intent alias (such as `"fast"`, `"smart"`, or `"cheap"`), cost accounting and budget deduction are calculated against that alias's configured rate, providing predictable billing even if a request fails over to a secondary provider in the fallback chain. Direct model routing (e.g. `{"model": "gemini-2.5-flash"}`) is priced according to the target model's entry.
 
 ```jsonc
 {
@@ -377,10 +383,10 @@ All routing chains, fallback targets, concurrency quotas, guardrail parameters, 
 ## Design Decisions
 
 - **Bulkheads per Provider:** A degraded upstream provider can only saturate its own semaphore pool; other providers remain fully isolated and available.
-- **Saturation Is Not Failure:** A full provider queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers only trip on bona fide errors (5xx, timeouts, connection drops).
-- **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold.
-- **Fail-Safe Rate Limiting:** If Redis goes down or times out, the rate limiter falls back to an in-memory token bucket so traffic is never left completely unthrottled.
-- **Fail Loudly at Startup:** An automated startup check validates every model in every chain to ensure stale aliases surface immediately upon deployment.
+- **Saturation Is Not Failure:** A full gateway semaphore queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers trip on bona fide server errors (5xx, timeouts, connection drops) and upstream provider rate limits (`429`) when `count_429: true` (the default in `models.json`).
+- **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold and immediately fail over to fallback providers without consuming retry budgets.
+- **Configurable Redis Outage Policy:** By default in `models.json`, rate limiting fails open to an in-memory token bucket (`redis_fail_closed: false`) so traffic is never left completely unthrottled during local Redis interruptions. Multi-instance deployments can set `RATE_LIMIT_FAIL_MODE=closed` to reject requests with `429` during Redis outages and avoid uncoordinated local quota drift across instances.
+- **Optional Startup Connectivity Smoke Test:** Setting `GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true` enables a non-blocking background smoke test at startup that sends minimal test pings across primary model chains (`fast`, `smart`, `cheap`) and surfaces passing/failing status in `/api/reliability/status`. By default, startup provider smoke tests are disabled (`false`) to ensure fast, deterministic offline launches and CI test execution without requiring live external provider API keys.
 
 ---
 

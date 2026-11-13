@@ -5923,13 +5923,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
               <select id="modalModelSelect" class="w-full bg-[#111827] border border-white/10 rounded-lg p-2.5 text-white focus:outline-none focus:border-cyan-500/50">
 
-                <option value="fast">Fast (Groq: llama-3.1-8b-instant)</option>
+                <option value="fast">Fast (Groq: openai/gpt-oss-120b)</option>
 
-                <option value="smart">Smart (Gemini: gemini-2.0-flash)</option>
+                <option value="smart">Smart (Gemini: gemini-2.5-flash)</option>
 
                 <option value="cheap">Cheap (OpenRouter: meta-llama/llama-3.1-8b-instruct)</option>
-
-                <option value="complex">Complex (Groq: llama-3.3-70b-versatile)</option>
 
               </select>
 
