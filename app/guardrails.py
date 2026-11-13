@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import re
-from app.db import sqlite3
+from app.db import DATABASE_URL, sqlite3
 import time
 import unicodedata
 import urllib.parse
@@ -30,7 +30,7 @@ def init_audit_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
+            timestamp DOUBLE PRECISION NOT NULL,
             key_id TEXT,
             key_name TEXT,
             endpoint TEXT NOT NULL,
@@ -42,6 +42,11 @@ def init_audit_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(timestamp);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_outcome ON audit_logs(outcome);")
+    if DATABASE_URL:
+        # float4 rounds epoch seconds to 128-second steps at current magnitudes.
+        cursor.execute(
+            "ALTER TABLE audit_logs ALTER COLUMN timestamp TYPE DOUBLE PRECISION USING timestamp::DOUBLE PRECISION"
+        )
     conn.commit()
     conn.close()
 

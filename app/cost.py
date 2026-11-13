@@ -57,7 +57,7 @@ def init_cost_db():
             completion_tokens INTEGER NOT NULL,
             total_tokens INTEGER NOT NULL,
             cost_usd REAL NOT NULL,
-            timestamp REAL NOT NULL
+            timestamp DOUBLE PRECISION NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cost_key_ts ON cost_records(key_id, timestamp);")
@@ -79,8 +79,8 @@ def init_cost_db():
             budget_date TEXT NOT NULL,
             amount NUMERIC(24,12) NOT NULL,
             status TEXT NOT NULL,
-            expires_at REAL NOT NULL,
-            created_at REAL NOT NULL
+            expires_at DOUBLE PRECISION NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_budget_reservations_expiry ON budget_reservations(status, expires_at);")
@@ -94,6 +94,16 @@ def init_cost_db():
         ):
             cursor.execute(
                 f"ALTER TABLE {table} ALTER COLUMN {column} TYPE NUMERIC(24,12) USING {column}::NUMERIC(24,12)"
+            )
+        # Epoch timestamps must be float8: float4 (REAL) rounds to 128-second
+        # steps at current Unix epoch magnitudes, which breaks short leases.
+        for table, column in (
+            ("cost_records", "timestamp"),
+            ("budget_reservations", "expires_at"),
+            ("budget_reservations", "created_at"),
+        ):
+            cursor.execute(
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE DOUBLE PRECISION USING {column}::DOUBLE PRECISION"
             )
 
     # Add daily_budget column to gateway_api_keys if missing

@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 import smtplib
-from app.db import sqlite3
+from app.db import DATABASE_URL, sqlite3
 import time
 import uuid
 from email.mime.multipart import MIMEMultipart
@@ -164,7 +164,7 @@ def init_auth_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
             otp_code TEXT NOT NULL,
-            expires_at REAL NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL,
             is_used INTEGER DEFAULT 0,
             attempts INTEGER DEFAULT 0,
             ip_address TEXT,
@@ -185,7 +185,7 @@ def init_auth_db():
         CREATE TABLE IF NOT EXISTS user_sessions (
             token TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
-            expires_at REAL NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
@@ -196,7 +196,7 @@ def init_auth_db():
             key TEXT PRIMARY KEY,
             access_token TEXT,
             refresh_token TEXT,
-            expires_at REAL,
+            expires_at DOUBLE PRECISION,
             email TEXT,
             scopes TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -207,10 +207,18 @@ def init_auth_db():
         CREATE TABLE IF NOT EXISTS oauth_states (
             state TEXT PRIMARY KEY,
             code_verifier TEXT NOT NULL,
-            expires_at REAL NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    if DATABASE_URL:
+        # float4 rounds epoch seconds to 128-second steps at current magnitudes,
+        # which can extend OTP and session lifetimes.
+        for table in ("otp_verifications", "user_sessions", "oauth_tokens", "oauth_states"):
+            cursor.execute(
+                f"ALTER TABLE {table} ALTER COLUMN expires_at TYPE DOUBLE PRECISION USING expires_at::DOUBLE PRECISION"
+            )
 
     conn.commit()
     conn.close()

@@ -2,6 +2,7 @@ import asyncio
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -215,6 +216,94 @@ async def test_reservation_insert_failure_rolls_back_account_increment(isolated_
     finally:
         conn.close()
     await tracker.release_budget(reservation_id, first_key)
+
+
+def _require_postgres():
+    if not db.DATABASE_URL or not os.getenv("GATEWAY_TEST_DATABASE_URL"):
+        if os.getenv("GATEWAY_REQUIRE_POSTGRES_TESTS") == "1":
+            pytest.fail("PostgreSQL integration is required but DATABASE_URL/GATEWAY_TEST_DATABASE_URL is missing")
+        pytest.skip("dedicated PostgreSQL integration service is not configured")
+    if db.DATABASE_URL != os.getenv("GATEWAY_TEST_DATABASE_URL"):
+        pytest.fail("DATABASE_URL must match the dedicated GATEWAY_TEST_DATABASE_URL")
+
+
+def test_postgres_epoch_columns_are_double_precision():
+    _require_postgres()
+    relevant = {
+        "budget_reservations": ("expires_at", "created_at"),
+        "cost_records": ("timestamp",),
+        "async_jobs": ("created_at", "updated_at", "lease_expires_at", "available_at"),
+        "audit_logs": ("timestamp",),
+        "otp_verifications": ("expires_at",),
+        "user_sessions": ("expires_at",),
+        "oauth_tokens": ("expires_at",),
+        "oauth_states": ("expires_at",),
+    }
+    conn = db.sqlite3.connect()
+    try:
+        rows = conn.execute(
+            """SELECT table_name, column_name, data_type FROM information_schema.columns
+               WHERE table_schema = 'llm_gateway'
+                 AND table_name IN ('budget_reservations', 'cost_records', 'async_jobs', 'audit_logs',
+                                    'otp_verifications', 'user_sessions', 'oauth_tokens', 'oauth_states')
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    types = {
+        (table, column): data_type
+        for table, column, data_type in rows
+        if column in relevant.get(table, ())
+    }
+    expected = {(table, column) for table, columns in relevant.items() for column in columns}
+    assert set(types) == expected
+    assert set(types.values()) == {"double precision"}
+
+
+@pytest.mark.asyncio
+async def test_postgres_short_expiry_survives_and_sweep_reclaims_it():
+    _require_postgres()
+    tracker = cost.CostTracker(redis_url="")
+    key_id = f"pg-precision-{uuid.uuid4().hex}"
+    short_id = recovered_id = None
+    try:
+        short_id, _ = await tracker.reserve_budget(key_id, "precision", 1.0, 0.1, lease_seconds=1.0)
+        assert short_id
+        conn = db.sqlite3.connect()
+        try:
+            created, expires = conn.execute(
+                "SELECT created_at, expires_at FROM budget_reservations WHERE id = ?", (short_id,)
+            ).fetchone()
+            # float4 rounds epoch seconds to 128s steps, collapsing a 1s lease to 0 or 128.
+            assert float(expires) - float(created) == pytest.approx(1.0, abs=0.01)
+            conn.execute(
+                "UPDATE budget_reservations SET expires_at = ? WHERE id = ?",
+                (time.time() - 0.25, short_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        recovered_id, _ = await tracker.reserve_budget(key_id, "precision", 1.0, 0.1)
+        assert recovered_id and recovered_id != short_id
+        conn = db.sqlite3.connect()
+        try:
+            assert conn.execute(
+                "SELECT status FROM budget_reservations WHERE id = ?", (short_id,)
+            ).fetchone() == ("expired",)
+        finally:
+            conn.close()
+    finally:
+        if recovered_id:
+            await tracker.release_budget(recovered_id, key_id)
+        conn = db.sqlite3.connect()
+        try:
+            conn.execute("DELETE FROM budget_reservations WHERE key_id = ?", (key_id,))
+            conn.execute("DELETE FROM budget_accounts WHERE key_id = ?", (key_id,))
+            conn.execute("DELETE FROM cost_records WHERE key_id = ?", (key_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 @pytest.mark.asyncio
