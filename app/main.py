@@ -53,6 +53,9 @@ from app.security import (
     ADMIN_TOKEN,
     get_client_ip,
     check_deploy_config,
+    GUEST_COOKIE_NAME,
+    generate_guest_identity,
+    validate_guest_identity,
 )
 
 from app.cost import (
@@ -2450,6 +2453,7 @@ def _set_public_response_headers(
     fallback_used: bool,
     latency_ms: float,
     cost_usd: float,
+    guest_id: Optional[str] = None,
 ) -> None:
 
     """Stable, non-sensitive routing metadata for clients and logs."""
@@ -2460,6 +2464,16 @@ def _set_public_response_headers(
     response.headers["X-Fallback-Used"] = "true" if fallback_used else "false"
     response.headers["X-Latency-Ms"] = f"{float(latency_ms):.2f}"
     response.headers["X-Cost-USD"] = f"{float(cost_usd):.8f}"
+    if guest_id:
+        response.headers["X-Guest-ID"] = guest_id
+        response.set_cookie(
+            key=GUEST_COOKIE_NAME,
+            value=guest_id,
+            max_age=30 * 86400,
+            httponly=True,
+            samesite="lax",
+            secure=COOKIE_SECURE,
+        )
 
 @app.post("/v1/chat")
 
@@ -2488,6 +2502,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
     request_id = f"req_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
     session_id = request.session_id or str(uuid.uuid4())
+    client_ip = get_client_ip(request_http)
 
     # -----------------------------------------------------------------------
     # Step 1 in Pipeline: Auth (Gateway API Key or Session Authentication)
@@ -2501,6 +2516,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
 
     user = None
     key_info = None
+    guest_id = None
 
     if raw_key:
         key_info = await asyncio.to_thread(validate_gateway_api_key, raw_key)
@@ -2521,17 +2537,42 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
         if session_token:
             user = await asyncio.to_thread(db_validate_session, session_token)
         if user:
-            key_info = {"id": 0, "name": f"user_{user['id']}", "quota": 60, "daily_budget": 50.0}
+            key_info = {"id": f"user_{user['id']}", "name": f"user_{user['id']}", "quota": 60, "daily_budget": 50.0}
         else:
-            # Seamless default developer/web guest for browser dashboard
-            key_info = {"id": 0, "name": "web_developer_guest", "quota": 60, "daily_budget": 50.0}
+            # Seamless persistent developer/web guest for browser dashboard
+            raw_guest_id = request_http.cookies.get(GUEST_COOKIE_NAME) or request_http.headers.get("X-Guest-ID")
+            if raw_guest_id:
+                raw_guest_id = raw_guest_id.strip()
+                is_valid, raw_token = validate_guest_identity(raw_guest_id)
+                if not is_valid:
+                    logger.warning("[AUTH] Invalid, malformed or forged guest identity attempted.")
+                    await AUDIT_LOGGER.log_event(
+                        key_id="guest_invalid",
+                        key_name="invalid_guest",
+                        endpoint="/v1/chat",
+                        outcome="blocked",
+                        hits=[{"detail": "Invalid or forged guest identity."}],
+                        summary="Blocked forged guest identity",
+                        ip_address=client_ip,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Forbidden: Invalid or forged guest identity.",
+                    )
+                guest_id = raw_guest_id
+            else:
+                guest_id = generate_guest_identity()
+                _, raw_token = validate_guest_identity(guest_id)
+
+            key_info = {"id": guest_id, "name": f"guest_{raw_token[:8]}", "quota": 60, "daily_budget": 50.0}
 
     user_id = user["id"] if user else None
+    owner_id = user["id"] if user else guest_id
     user_name = user["name"] if user else None
     user_email = user["email"] if user else None
 
     existing_session = await asyncio.to_thread(db_get_session_owner, session_id)
-    if existing_session and existing_session["user_id"] != user_id:
+    if existing_session and existing_session["user_id"] is not None and existing_session["user_id"] != owner_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: chat session belongs to another user.",
@@ -2539,16 +2580,15 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
 
     # -----------------------------------------------------------------------
     # Step 2 in Pipeline: Rate Limit (Redis Token Bucket, one bucket per caller)
-    # API key -> key:<id>; logged-in user -> user:<id>; guest -> ip:<client ip>.
+    # API key -> key:<id>; logged-in user -> user:<id>; guest -> guest:<id>.
     # Anonymous callers must never share a bucket, or one visitor can starve all.
     # -----------------------------------------------------------------------
-    client_ip = get_client_ip(request_http)
     if raw_key:
         rate_bucket = f"key:{key_info['id']}"
     elif user:
         rate_bucket = f"user:{user['id']}"
     else:
-        rate_bucket = f"ip:{client_ip}"
+        rate_bucket = f"guest:{guest_id}"
 
     await TRAFFIC_BROADCASTER.broadcast("redis_check", {"key_id": key_info["id"], "quota": key_info.get("quota", 60)})
     allowed, retry_after, remaining = await RATE_LIMITER.check_rate_limit(
@@ -2565,10 +2605,13 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             "retry_after": retry_after,
             "status_code": 429,
         })
+        rate_headers = {"Retry-After": str(retry_after)}
+        if guest_id:
+            rate_headers["X-Guest-ID"] = guest_id
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Too Many Requests: Rate limit quota exceeded for key '{key_info['name']}'. Please retry in {retry_after}s.",
-            headers={"Retry-After": str(retry_after)},
+            headers=rate_headers,
         )
 
     key_daily_budget = float(key_info.get("daily_budget") or 5.0)
@@ -2648,7 +2691,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
                     session_id=session_id,
                     title=title,
                     model=f"{cached_resp.get('provider')} ({cached_resp.get('model')})",
-                    user_id=user_id,
+                    user_id=owner_id,
                     user_name=user_name,
                     user_email=user_email,
                 )
@@ -2696,6 +2739,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             fallback_used=False,
             latency_ms=2.0,
             cost_usd=0.0,
+            guest_id=guest_id,
         )
 
         return cached_resp
@@ -2716,9 +2760,13 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             "key_id": key_info["id"], "key_name": key_info["name"],
             "current_spend": current_spend, "daily_budget": key_daily_budget, "status_code": 429,
         })
+        budget_headers = {}
+        if guest_id:
+            budget_headers["X-Guest-ID"] = guest_id
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Budget exceeded: Daily budget limit of ${key_daily_budget:.2f} cannot reserve estimated request cost.",
+            headers=budget_headers if budget_headers else None,
         )
 
     # -----------------------------------------------------------------------
@@ -2918,7 +2966,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
 
                 model=f"{provider} ({model})",
 
-                user_id=user_id,
+                user_id=owner_id,
 
                 user_name=user_name,
 
@@ -2956,6 +3004,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
         fallback_used=fallback_used,
         latency_ms=latency_ms,
         cost_usd=cost_usd,
+        guest_id=guest_id,
     )
 
     # Standard response: text, finish_reason, token usage, latency plus provider, model, alias, fallback_used, attempts

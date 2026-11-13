@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import math
 import os
+import re
 import secrets
 from app import db
 from app.db import DATABASE_URL, sqlite3
@@ -514,3 +516,36 @@ def verify_admin_auth(
             detail="Forbidden: Valid Admin Token required for this operation.",
         )
     return True
+
+
+GUEST_COOKIE_NAME = "llm_gateway_guest_id"
+_GUEST_SECRET = (
+    os.getenv("GATEWAY_GUEST_SECRET", "").strip().encode("utf-8")
+    or (ADMIN_TOKEN.encode("utf-8") if ADMIN_TOKEN else b"llm-gateway-guest-default-secret")
+)
+_GUEST_ID_PATTERN = re.compile(r"^guest_([0-9a-f]{32})_([0-9a-f]{16})$")
+
+
+def generate_guest_identity() -> str:
+    """Generate a secure, persistent, tamper-evident guest identifier."""
+    raw_token = secrets.token_hex(16)
+    sig = hmac.new(_GUEST_SECRET, raw_token.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return f"guest_{raw_token}_{sig}"
+
+
+def validate_guest_identity(guest_id: Optional[str]) -> Tuple[bool, Optional[str]]:
+    """
+    Validate a guest identifier.
+    Returns (is_valid, parsed_raw_token).
+    """
+    if not guest_id or not isinstance(guest_id, str):
+        return False, None
+    match = _GUEST_ID_PATTERN.match(guest_id.strip())
+    if not match:
+        return False, None
+    raw_token, sig = match.groups()
+    expected_sig = hmac.new(_GUEST_SECRET, raw_token.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    if secrets.compare_digest(sig, expected_sig):
+        return True, raw_token
+    return False, None
+
