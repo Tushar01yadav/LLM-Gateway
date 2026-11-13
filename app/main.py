@@ -16,7 +16,7 @@ import re
 
 import secrets
 
-from app.db import sqlite3
+from app.db import DATABASE_URL, sqlite3
 
 import subprocess
 
@@ -198,7 +198,7 @@ def init_db():
 
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-            user_id INTEGER,
+            user_id TEXT,
 
             user_name TEXT,
 
@@ -208,7 +208,7 @@ def init_db():
 
     """)
 
-    for col, col_type in [("user_id", "INTEGER"), ("user_name", "TEXT"), ("user_email", "TEXT")]:
+    for col, col_type in [("user_id", "TEXT"), ("user_name", "TEXT"), ("user_email", "TEXT")]:
 
         try:
 
@@ -217,6 +217,53 @@ def init_db():
         except Exception:
 
             pass
+
+    if DATABASE_URL:
+
+        # Legacy PostgreSQL schemas declared user_id INTEGER, which rejects UUID
+        # user ids. ALTER ... TYPE is a no-op when the column is already text.
+        cursor.execute(
+            "ALTER TABLE sessions ALTER COLUMN user_id TYPE TEXT USING user_id::TEXT"
+        )
+
+    else:
+
+        cursor.execute("PRAGMA table_info(sessions)")
+
+        declared_types = {row[1]: (row[2] or "").upper() for row in cursor.fetchall()}
+
+        if declared_types.get("user_id") != "TEXT":
+
+            # SQLite cannot change a column type in place; rebuild and copy every
+            # row so legacy integer ids survive as their text representation.
+            conn.commit()
+
+            cursor.execute("PRAGMA foreign_keys=OFF")
+
+            cursor.execute("""
+                CREATE TABLE sessions_new (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    model TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_id TEXT,
+                    user_name TEXT,
+                    user_email TEXT
+                )
+            """)
+
+            cursor.execute("""
+                INSERT INTO sessions_new (id, title, model, created_at, user_id, user_name, user_email)
+                SELECT id, title, model, created_at, user_id, user_name, user_email FROM sessions
+            """)
+
+            cursor.execute("DROP TABLE sessions")
+
+            cursor.execute("ALTER TABLE sessions_new RENAME TO sessions")
+
+            cursor.execute("PRAGMA foreign_keys=ON")
+
+            conn.commit()
 
     cursor.execute("""
 
@@ -308,7 +355,7 @@ def db_create_session(
 
     model: str,
 
-    user_id: Optional[int] = None,
+    user_id: Optional[str] = None,
 
     user_name: Optional[str] = None,
 
@@ -362,7 +409,7 @@ def db_save_message(
 
     conn.close()
 
-def db_get_sessions(user_id: int):
+def db_get_sessions(user_id: str):
 
     conn = sqlite3.connect(DB_PATH)
 
@@ -490,7 +537,7 @@ def db_get_session_owner(session_id: str) -> Optional[Dict[str, Any]]:
 
     return {"id": row[0], "user_id": row[1]}
 
-def db_clear_user_sessions(user_id: int):
+def db_clear_user_sessions(user_id: str):
 
     conn = sqlite3.connect(DB_PATH)
 
@@ -854,6 +901,21 @@ HTTP_REQUESTS_IN_PROGRESS = Gauge(
     "Number of HTTP requests currently being handled",
     ("method",),
 )
+PERSISTENCE_FAILURES = Counter(
+    "gateway_persistence_failures_total",
+    "Chat history persistence failures recorded instead of failing the request",
+    ("path",),
+)
+
+
+def _record_persistence_failure(path: str, session_id: str, error: Exception) -> None:
+    PERSISTENCE_FAILURES.labels(path=path).inc()
+    logger.exception(
+        "Chat history persistence failed path=%s session_id=%s error=%s",
+        path,
+        session_id,
+        error,
+    )
 
 
 @app.middleware("http")
@@ -936,7 +998,7 @@ async def require_session_user(request_http: Request) -> Dict[str, Any]:
 
     return user
 
-def _assert_session_owner(session_id: str, user_id: int):
+def _assert_session_owner(session_id: str, user_id: str):
 
     owner = db_get_session_owner(session_id)
 
@@ -2613,7 +2675,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
                 queue_wait_ms=0.0,
             )
         except Exception as db_err:
-            logger.warning(f"Cache-hit session persistence failed: {db_err}")
+            _record_persistence_failure("cache_hit", session_id, db_err)
 
         await TRAFFIC_BROADCASTER.broadcast("cache_hit", {
             "key_id": key_info["id"],
@@ -2884,7 +2946,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
 
     except Exception as db_err:
 
-        logger.warning("Database persistence notice: %s", db_err)
+        _record_persistence_failure("chat", session_id, db_err)
 
     _set_public_response_headers(
         response,
