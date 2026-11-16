@@ -1,5 +1,9 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,6 +13,7 @@ from app.main import app
 from app.security import ADMIN_TOKEN, create_gateway_api_key, revoke_gateway_api_key
 
 LIMIT = 1024
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 async def _echo_app(scope, receive, send):
@@ -243,6 +248,54 @@ async def test_oversized_chunked_unauthenticated_request_rejected():
             headers={"Content-Type": "application/json"},
         )
     assert res.status_code == 413
+
+
+def test_transport_limit_applies_when_semantic_guardrails_are_disabled():
+    """The body cap is memory safety, so guardrails.enabled must not disable it."""
+    script = """
+import asyncio
+import os
+
+os.environ["GATEWAY_ADMIN_TOKEN"] = "test-admin-token"
+os.environ["APP_ENV"] = "development"
+os.environ["DATABASE_URL"] = ""
+os.environ["REDIS_URL"] = ""
+os.environ["CIRCUIT_BREAKER_REDIS_URL"] = ""
+
+import app.guardrails as guardrails
+
+guardrails.GUARDRAILS.enabled = False
+
+import app.main as main
+from httpx import ASGITransport, AsyncClient
+
+
+async def check():
+    transport = ASGITransport(app=main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        res = await ac.post(
+            "/v1/chat",
+            content=b"{}",
+            headers={"Content-Type": "application/json", "Content-Length": "2097152"},
+        )
+    assert res.status_code == 413, (res.status_code, res.text)
+    print("RESULT", res.status_code)
+
+
+asyncio.run(check())
+"""
+    env = os.environ.copy()
+    env["GATEWAY_TEST_DISABLE_REDIS"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "RESULT 413" in result.stdout
 
 
 @pytest.mark.asyncio

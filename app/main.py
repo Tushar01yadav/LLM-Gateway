@@ -886,11 +886,11 @@ app = FastAPI(
 
 )
 
-# Reuses the OWASP LLM10 payload-size setting so the limit is enforced before
-# route-level guards can be bypassed by chunked or unauthenticated requests.
+# Transport-level memory safety: reuse the OWASP LLM10 payload-size setting and
+# keep it enforced even when semantic guardrails are disabled.
 app.add_middleware(
     RequestBodyLimitMiddleware,
-    max_body_bytes=GUARDRAILS.max_body_bytes if GUARDRAILS.enabled else None,
+    max_body_bytes=GUARDRAILS.max_body_bytes,
 )
 
 
