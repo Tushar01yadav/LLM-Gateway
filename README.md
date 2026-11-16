@@ -245,7 +245,7 @@ production when `TRUSTED_PROXY_COUNT > 0` but uvicorn proxy headers are not
 provably disabled (`--no-proxy-headers`, or `GATEWAY_PROXY_HEADERS_DISABLED=1`
 for non-CLI launchers such as gunicorn). With `APP_ENV=production` and
 `TRUSTED_PROXY_COUNT=0` it logs a warning: if a reverse proxy is in front,
-per-IP limits would otherwise all bucket on the proxy address.
+IP-scoped checks and audit logs would see the proxy address for every caller.
 
 > **Proxy headers:** always run uvicorn with `--no-proxy-headers`. Uvicorn's
 > default middleware rewrites `request.client` from `X-Forwarded-For` for
@@ -269,12 +269,23 @@ docker run --rm -p 8000:8000 \
   llm-gateway
 ```
 
-The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`.
-`gateway.db` is created inside the container at `/app/gateway.db`. To persist
-sessions, keys, and logs across restarts, mount a volume specifically for the database
-file (e.g. `-v llm_gateway_db:/app/gateway.db` or `-v $(pwd)/gateway.db:/app/gateway.db`).
-**Never mount a host directory over `/app`**, as doing so shadows and masks the application
-code built into the container image.
+The image runs as a non-root user (UID 10001) and includes a `HEALTHCHECK` against `/health`.
+`gateway.db` is created inside the container at `/app/gateway.db`. To persist sessions,
+keys, and logs across restarts, bind-mount a **host file** that already exists at that path:
+
+```bash
+touch gateway.db && chmod 666 gateway.db   # or: sudo chown 10001:10001 gateway.db
+docker run --rm -p 8000:8000 \
+  -e GATEWAY_ADMIN_TOKEN=change-me \
+  -v "$(pwd)/gateway.db:/app/gateway.db" \
+  llm-gateway
+```
+
+A named volume mounted at `/app/gateway.db` (for example `-v llm_gateway_db:/app/gateway.db`)
+does **not** work: Docker creates a directory at the mount point, so SQLite fails with
+`unable to open database file`. The host file must also be writable by UID 10001 inside
+the container. **Never mount a host directory over `/app`**, as doing so shadows and masks
+the application code built into the container image.
 
 ### 5. One-command demo (Docker Compose)
 
@@ -310,7 +321,7 @@ curl -X POST http://localhost:18000/v1/chat \
 ```
 
 Anonymous callers are a supported guest path: `/v1/chat` without an API key or
-session cookie automatically receives an HMAC-signed guest token (`llm_gateway_guest` cookie
+session cookie automatically receives an HMAC-signed guest token (`llm_gateway_guest_id` cookie
 and `X-Guest-ID` header) with an isolated budget account and rate limit bucket (`guest:<id>`).
 Invalid or revoked keys are still rejected with `401`.
 
@@ -386,7 +397,7 @@ When requests are submitted using an intent alias (such as `"fast"`, `"smart"`, 
 - **Saturation Is Not Failure:** A full gateway semaphore queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers trip on bona fide server errors (5xx, timeouts, connection drops) and upstream provider rate limits (`429`) when `count_429: true` (the default in `models.json`).
 - **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold and immediately fail over to fallback providers without consuming retry budgets.
 - **Configurable Redis Outage Policy:** By default in `models.json`, rate limiting fails open to an in-memory token bucket (`redis_fail_closed: false`) so traffic is never left completely unthrottled during local Redis interruptions. Multi-instance deployments can set `RATE_LIMIT_FAIL_MODE=closed` to reject requests with `429` during Redis outages and avoid uncoordinated local quota drift across instances.
-- **Optional Startup Connectivity Smoke Test:** Setting `GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true` enables a non-blocking background smoke test at startup that sends minimal test pings across primary model chains (`fast`, `smart`, `cheap`) and surfaces passing/failing status in `/api/reliability/status`. By default, startup provider smoke tests are disabled (`false`) to ensure fast, deterministic offline launches and CI test execution without requiring live external provider API keys.
+- **Optional Startup Connectivity Smoke Test:** Setting `GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true` enables a non-blocking background smoke test at startup that sends a minimal test ping to every model in the `fast`, `smart`, and `cheap` fallback chains and surfaces passing/failing status in `/api/reliability/status`. By default, startup provider smoke tests are disabled (`false`) to ensure fast, deterministic offline launches and CI test execution without requiring live external provider API keys.
 
 ---
 

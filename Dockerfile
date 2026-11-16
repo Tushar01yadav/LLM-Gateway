@@ -14,7 +14,9 @@ COPY app ./app
 COPY models.json .
 COPY scripts/migrate_sqlite_to_supabase.py ./scripts/migrate_sqlite_to_supabase.py
 
-# gateway.db is created at /app/gateway.db on first start. Mount a volume specifically at /app/gateway.db (never mount over /app directly, as that shadows application code).
+# gateway.db is created at /app/gateway.db on first start. To persist it, bind-mount a
+# pre-created host file there (writable by UID 10001). A named volume at that path becomes
+# a directory and SQLite cannot open it. Never mount over /app directly: that shadows code.
 RUN useradd --create-home --uid 10001 gateway \
     && chown -R gateway:gateway /app
 USER gateway

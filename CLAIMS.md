@@ -65,7 +65,7 @@ host-bound; see `docs/benchmarks/phase4-load-before-after.md` for measured host 
 
 Both originally asserted 401 for a missing credential. The product decision
 allows instant anonymous chat under an isolated guest quota (identified and isolated
-via HMAC-signed guest tokens and separate budget accounts, rather than raw per-IP sharing),
+via HMAC-signed guest tokens and separate per-guest budget accounts),
 so they now assert 200 for the guest path and keep the 401 assertions for invalid and revoked
 keys. This matches the code rather than hiding the mismatch.
 

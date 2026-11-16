@@ -6630,8 +6630,6 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <option value="cheap">Cheap (OpenRouter)</option>
 
-            <option value="complex">Complex (Groq 70B)</option>
-
           </select>
 
           <div class="h-3.5 w-px bg-white/10"></div>
@@ -8813,7 +8811,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
       {
 
-        id: 'gemini-2.0-flash',
+        id: 'gemini-2.5-flash',
 
         name: 'Gemini Flash',
 
@@ -8826,24 +8824,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         tagClass: 'bg-teal-950/80 border border-teal-500/40 text-teal-300',
 
         desc: 'Next-gen multimodal reasoning'
-
-      },
-
-      {
-
-        id: 'gemini-1.5-flash',
-
-        name: 'Gemini Lite',
-
-        provider: 'gemini',
-
-        providerLabel: 'Google Gemini',
-
-        tag: 'Fast',
-
-        tagClass: 'bg-amber-950/80 border border-amber-500/40 text-amber-300',
-
-        desc: 'Lightweight multimodal'
 
       }
 
@@ -11783,7 +11763,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
               <span class="text-[10px] font-bold text-teal-400 uppercase tracking-wider block">Dynamic Target Resolution</span>
 
-              <p class="text-xs text-gray-300">Inspects inbound request targets (<code>fast</code>, <code>smart</code>, <code>cheap</code>, <code>complex</code>) and resolves primary and fallback provider sequences from <code>models.json</code>.</p>
+              <p class="text-xs text-gray-300">Inspects inbound request targets (<code>fast</code>, <code>smart</code>, <code>cheap</code>) and resolves primary and fallback provider sequences from <code>models.json</code>.</p>
 
             </div>
 

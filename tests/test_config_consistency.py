@@ -66,6 +66,20 @@ def test_circuit_breaker_429_configuration_consistency():
     assert should_count is cb_cfg["count_429"]
 
 
+def test_circuit_breaker_429_counting_can_be_disabled():
+    """count_429=false must stop 429 from counting, globally or per provider."""
+    disabled = {"circuit_breakers": {"count_429": False, "providers": {}}}
+    assert should_count_circuit_failure(429, True, "groq", disabled) is False
+    assert should_count_circuit_failure(503, True, "groq", disabled) is True
+    assert should_count_circuit_failure(429, False, "groq", disabled) is False
+
+    provider_override = {
+        "circuit_breakers": {"count_429": True, "providers": {"groq": {"count_429": False}}}
+    }
+    assert should_count_circuit_failure(429, True, "groq", provider_override) is False
+    assert should_count_circuit_failure(429, True, "gemini", provider_override) is True
+
+
 def test_rate_limit_fail_mode_precedence(monkeypatch):
     """Verify rate_limit_fail_closed precedence: env override > models.json."""
     cfg = get_models_config()
