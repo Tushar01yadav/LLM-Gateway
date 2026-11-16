@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gateway_test
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.multi-instance-test
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway_test
+      GATEWAY_TEST_DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway_test
+      REDIS_URL: redis://redis:6379/15
+      CIRCUIT_BREAKER_REDIS_URL: redis://redis:6379/14
+      GATEWAY_ADMIN_TOKEN: multi-instance-test-admin-token
+      GATEWAY_STARTUP_PROVIDER_SMOKE_TEST: "false"
+      GATEWAY_REQUIRE_MULTI_INSTANCE_TESTS: "1"
+      GATEWAY_JOB_LEASE_SECONDS: "4"
+      GATEWAY_JOB_HEARTBEAT_SECONDS: "1"
+      RATE_LIMIT_FAIL_MODE: closed
+      GROQ_API_KEY: ""
+      OPENROUTER_API_KEY: ""
+      GEMINI_API_KEY: ""
+    volumes:
+      - ./tests/fixtures/models_multi_instance.json:/app/models.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

@@ -1,6 +1,6 @@
 import math
 import os
-import sqlite3
+from app.db import sqlite3
 import time
 from typing import Any, Dict, Iterable, List
 

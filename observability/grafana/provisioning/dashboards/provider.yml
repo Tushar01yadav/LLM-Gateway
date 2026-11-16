@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: LLM Gateway
+    orgId: 1
+    folder: LLM Gateway
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /etc/grafana/provisioning/dashboards

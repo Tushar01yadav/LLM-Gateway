@@ -6,6 +6,8 @@ LLM Gateway routes chat requests to configured providers through one API. It inc
 
 **60-second demo:** [docs/demo.md](docs/demo.md).
 
+Multi-process PostgreSQL/Redis verification topology, guarantees, and limitations: [docs/multi-instance-reliability.md](docs/multi-instance-reliability.md).
+
 ---
 
 ## Architecture
@@ -117,9 +119,10 @@ Applications that invoke upstream LLM providers directly encounter predictable s
 | **Security** | Gateway API keys, admin verification, sliding-window token bucket (Redis + memory fallback) | **Built** | `app/security.py` |
 | **Guardrails (heuristic)** | Prompt-injection pattern scan (NFKC/zero-width/control-normalized), SSRF private-IP blocker, hard-secret redaction, PII flagging without silent rewriting, system-prompt masking | **Built** | `app/guardrails.py`, `docs/security-findings.md` |
 | **Cost & Budget** | Per-model token calculation, daily budget caps, response caching, request coalescing | **Built** | `app/cost.py` |
-| **Async Jobs** | Background job queue (`/v1/jobs`), idempotency keys, Dead Letter Queue (DLQ) with `/replay` | **Built** | `app/jobs.py` |
+| **Async Jobs** | Database-backed leases and reconciliation, tenant-scoped idempotency, retries and DLQ replay | **Built** | `app/jobs.py`, `docs/async-jobs.md` |
 | **Observability** | Live visualizer dashboard and real-time Server-Sent Events (`/api/reliability/traffic-stream`) | **Built** | `app/main.py`, `/visualize` |
-| **Observability** | Prometheus metrics export & OpenTelemetry distributed tracing | Planned | Next iteration |
+| **Observability** | Prometheus HTTP metrics export & provisioned Grafana dashboard | **Built** | `/metrics`, `observability/` |
+| **Observability** | OpenTelemetry distributed tracing | Planned | Next iteration |
 
 ### Guardrail scope (heuristic baseline)
 
@@ -242,7 +245,7 @@ production when `TRUSTED_PROXY_COUNT > 0` but uvicorn proxy headers are not
 provably disabled (`--no-proxy-headers`, or `GATEWAY_PROXY_HEADERS_DISABLED=1`
 for non-CLI launchers such as gunicorn). With `APP_ENV=production` and
 `TRUSTED_PROXY_COUNT=0` it logs a warning: if a reverse proxy is in front,
-per-IP limits would otherwise all bucket on the proxy address.
+IP-scoped checks and audit logs would see the proxy address for every caller.
 
 > **Proxy headers:** always run uvicorn with `--no-proxy-headers`. Uvicorn's
 > default middleware rewrites `request.client` from `X-Forwarded-For` for
@@ -266,9 +269,23 @@ docker run --rm -p 8000:8000 \
   llm-gateway
 ```
 
-The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`.
-`gateway.db` is created inside the container; mount a volume at `/app` (or
-`/app/gateway.db`) to persist sessions, keys, and logs across restarts.
+The image runs as a non-root user (UID 10001) and includes a `HEALTHCHECK` against `/health`.
+`gateway.db` is created inside the container at `/app/gateway.db`. To persist sessions,
+keys, and logs across restarts, bind-mount a **host file** that already exists at that path:
+
+```bash
+touch gateway.db && chmod 666 gateway.db   # or: sudo chown 10001:10001 gateway.db
+docker run --rm -p 8000:8000 \
+  -e GATEWAY_ADMIN_TOKEN=change-me \
+  -v "$(pwd)/gateway.db:/app/gateway.db" \
+  llm-gateway
+```
+
+A named volume mounted at `/app/gateway.db` (for example `-v llm_gateway_db:/app/gateway.db`)
+does **not** work: Docker creates a directory at the mount point, so SQLite fails with
+`unable to open database file`. The host file must also be writable by UID 10001 inside
+the container. **Never mount a host directory over `/app`**, as doing so shadows and masks
+the application code built into the container image.
 
 ### 5. One-command demo (Docker Compose)
 
@@ -276,17 +293,24 @@ The image runs as a non-root user and includes a `HEALTHCHECK` against `/health`
 docker compose up --build
 ```
 
-Starts the gateway, Redis, and a load generator. The load generator drives the
-built-in mock providers, so **no provider API keys are needed**: it checks
+Starts the gateway, Redis, Prometheus, Grafana, and a load generator. Prometheus
+scrapes the gateway's low-cardinality HTTP request metrics; Grafana provisions
+an overview dashboard for request rate, 5xx rate, latency percentiles, and
+in-flight requests. Both observability service ports are bound to localhost.
+Set `GRAFANA_ADMIN_PASSWORD` in `.env` to replace the local demo default. The
+dashboard can also be opened from the Observability page's **Prometheus & Grafana** tab.
+
+The load generator drives the built-in mock providers, so **no provider API keys are needed**: it checks
 health, sends a chat request, inspects the response headers, injects a 503 fault
 on `mock`, and confirms `mock_failover` serves the request from `mock2` with
-`X-Fallback-Used: true`. The dashboard is at `http://localhost:8000/visualize`
+`X-Fallback-Used: true`. The dashboard is at `http://localhost:18000/visualize`
 (open Settings and paste `demo-admin-token` to unlock admin panels).
+Prometheus is at `http://localhost:19090` and Grafana is at `http://localhost:13000`.
 Use `docker compose down -v` to remove the demo stack.
 
 ```bash
 # Example chat completion request
-curl -X POST http://localhost:8000/v1/chat \
+curl -X POST http://localhost:18000/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "model": "fast",
@@ -297,14 +321,17 @@ curl -X POST http://localhost:8000/v1/chat \
 ```
 
 Anonymous callers are a supported guest path: `/v1/chat` without an API key or
-session cookie is served under a per-IP guest quota. Invalid or revoked keys are
-still rejected with `401`.
+session cookie automatically receives an HMAC-signed guest token (`llm_gateway_guest_id` cookie
+and `X-Guest-ID` header) with an isolated budget account and rate limit bucket (`guest:<id>`).
+Invalid or revoked keys are still rejected with `401`.
 
 ---
 
 ## Configuration (`models.json`)
 
-All routing chains, fallback targets, concurrency quotas, guardrail parameters, and token prices are centrally defined in `models.json`. **No model names or prices are hardcoded in application logic.**
+All routing chains, fallback targets, concurrency quotas, guardrail parameters, and token prices are centrally defined in `models.json`. The configuration file serves as the single source of truth for routing and costing; safe baseline pricing fallbacks are retained in `app/cost.py` only to ensure no valid request ever logs a zero-dollar path.
+
+When requests are submitted using an intent alias (such as `"fast"`, `"smart"`, or `"cheap"`), cost accounting and budget deduction are calculated against that alias's configured rate, providing predictable billing even if a request fails over to a secondary provider in the fallback chain. Direct model routing (e.g. `{"model": "gemini-2.5-flash"}`) is priced according to the target model's entry.
 
 ```jsonc
 {
@@ -367,14 +394,16 @@ All routing chains, fallback targets, concurrency quotas, guardrail parameters, 
 ## Design Decisions
 
 - **Bulkheads per Provider:** A degraded upstream provider can only saturate its own semaphore pool; other providers remain fully isolated and available.
-- **Saturation Is Not Failure:** A full provider queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers only trip on bona fide errors (5xx, timeouts, connection drops).
-- **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold.
-- **Fail-Safe Rate Limiting:** If Redis goes down or times out, the rate limiter falls back to an in-memory token bucket so traffic is never left completely unthrottled.
-- **Fail Loudly at Startup:** An automated startup check validates every model in every chain to ensure stale aliases surface immediately upon deployment.
+- **Saturation Is Not Failure:** A full gateway semaphore queue sheds excess load with `429 + Retry-After` rather than tripping circuit breakers. Breakers trip on bona fide server errors (5xx, timeouts, connection drops) and upstream provider rate limits (`429`) when `count_429: true` (the default in `models.json`).
+- **Client Errors Do Not Open Breakers:** Client-side 4xx errors (`400`, `401`, `403`) are not counted toward the circuit breaker failure threshold and immediately fail over to fallback providers without consuming retry budgets.
+- **Configurable Redis Outage Policy:** By default in `models.json`, rate limiting fails open to an in-memory token bucket (`redis_fail_closed: false`) so traffic is never left completely unthrottled during local Redis interruptions. Multi-instance deployments can set `RATE_LIMIT_FAIL_MODE=closed` to reject requests with `429` during Redis outages and avoid uncoordinated local quota drift across instances.
+- **Optional Startup Connectivity Smoke Test:** Setting `GATEWAY_STARTUP_PROVIDER_SMOKE_TEST=true` enables a non-blocking background smoke test at startup that sends a minimal test ping to every model in the `fast`, `smart`, and `cheap` fallback chains and surfaces passing/failing status in `/api/reliability/status`. By default, startup provider smoke tests are disabled (`false`) to ensure fast, deterministic offline launches and CI test execution without requiring live external provider API keys.
 
 ---
 
 ## Testing
+
+For the Python 3.10, PostgreSQL, Redis, focused test, and CI-equivalent setup, see [CI and local verification](docs/ci-testing.md).
 
 ```bash
 # Install test dependencies (pytest, pytest-asyncio)

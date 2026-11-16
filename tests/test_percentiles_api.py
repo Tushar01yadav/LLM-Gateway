@@ -20,6 +20,8 @@ async def test_stats_exposes_real_latency_percentiles():
             assert res.status_code == 200
 
         stats = await ac.get("/api/stats")
+        assert stats.status_code == 403
+        stats = await ac.get("/api/stats", headers={"X-Admin-Token": "test-admin-token"})
         assert stats.status_code == 200
         body = stats.json()
         assert "latency_percentiles" in body
@@ -41,3 +43,12 @@ async def test_stats_exposes_real_latency_percentiles():
         nodes = {n["provider"]: n for n in listed.json()}
         # provider-nodes only lists real providers; percentiles must still be a dict when absent.
         assert all(isinstance(n.get("percentiles"), dict) for n in nodes.values())
+
+
+@pytest.mark.asyncio
+async def test_operational_metrics_require_admin_token():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        for path in ("/api/stats", "/api/concurrency/status", "/api/cost/metrics"):
+            response = await ac.get(path)
+            assert response.status_code == 403

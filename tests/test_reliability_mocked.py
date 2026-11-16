@@ -123,7 +123,7 @@ async def test_breaker_ignores_non_retryable_errors():
     Verify that 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404, 422
     do NOT increment consecutive_failures and do NOT trip the breaker to OPEN.
     """
-    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=60.0)
+    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=60.0, redis_url="")
     assert cb.state == "CLOSED"
 
     # Simulate 10 non-retryable failures (400, 401, 403, 404, 422)
@@ -151,7 +151,7 @@ async def test_breaker_counts_retryable_failures_and_trips():
     Verify that 5xx, 429, timeouts, and network errors DO increment consecutive_failures
     and trip the breaker to OPEN after reaching the failure threshold (5).
     """
-    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=60.0)
+    cb = CircuitBreaker("test_provider", failure_threshold=5, cooldown_seconds=60.0, redis_url="")
 
     # Retryable errors: 500, 502, 503, 429, ReadTimeout
     retryable_errors = [
