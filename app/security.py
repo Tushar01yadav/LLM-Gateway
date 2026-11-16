@@ -548,4 +548,3 @@ def validate_guest_identity(guest_id: Optional[str]) -> Tuple[bool, Optional[str
     if secrets.compare_digest(sig, expected_sig):
         return True, raw_token
     return False, None
-
