@@ -2581,36 +2581,55 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
     # -----------------------------------------------------------------------
     # Step 2 in Pipeline: Rate Limit (Redis Token Bucket, one bucket per caller)
     # API key -> key:<id>; logged-in user -> user:<id>; guest -> guest:<id>.
-    # Anonymous callers must never share a bucket, or one visitor can starve all.
+    # Anonymous callers also consume a shared ip:<addr> bucket, so dropping the
+    # guest cookie and presenting a fresh identity cannot mint unlimited quota.
+    # The IP comes from get_client_ip(), which only honors X-Forwarded-For for
+    # the configured number of trusted proxies.
     # -----------------------------------------------------------------------
     if raw_key:
-        rate_bucket = f"key:{key_info['id']}"
+        rate_buckets = [(f"key:{key_info['id']}", False)]
     elif user:
-        rate_bucket = f"user:{user['id']}"
+        rate_buckets = [(f"user:{user['id']}", False)]
     else:
-        rate_bucket = f"guest:{guest_id}"
+        rate_buckets = [
+            (f"guest:{guest_id}", False),
+            (f"ip:{client_ip}", True),
+        ]
+    # Cache isolation stays per caller identity (guest id, not shared IP), so
+    # separate guests behind one NAT still cannot read each other's responses.
+    caller_scope = rate_buckets[0][0]
 
     await TRAFFIC_BROADCASTER.broadcast("redis_check", {"key_id": key_info["id"], "quota": key_info.get("quota", 60)})
-    allowed, retry_after, remaining = await RATE_LIMITER.check_rate_limit(
-        key_id=rate_bucket,
-        quota_rpm=key_info.get("quota", 60),
-    )
-    if not allowed:
+    for bucket_key, is_ip_scope in rate_buckets:
+        allowed, retry_after, remaining = await RATE_LIMITER.check_rate_limit(
+            key_id=bucket_key,
+            quota_rpm=key_info.get("quota", 60),
+        )
+        if allowed:
+            continue
+        bucket_name = f"anonymous_ip:{client_ip}" if is_ip_scope else key_info["name"]
         logger.warning(
-            f"[RATE_LIMIT] Key '{key_info['name']}' (ID: {key_info['id']}) exceeded quota ({key_info.get('quota', 60)} rpm). Retry-After: {retry_after}s."
+            f"[RATE_LIMIT] Key '{bucket_name}' (ID: {key_info['id']}) exceeded quota ({key_info.get('quota', 60)} rpm). Retry-After: {retry_after}s."
         )
         await TRAFFIC_BROADCASTER.broadcast("rate_limited", {
             "key_id": key_info["id"],
-            "key_name": key_info["name"],
+            "key_name": bucket_name,
             "retry_after": retry_after,
             "status_code": 429,
         })
         rate_headers = {"Retry-After": str(retry_after)}
         if guest_id:
             rate_headers["X-Guest-ID"] = guest_id
+        if is_ip_scope:
+            detail = (
+                "Too Many Requests: Anonymous client IP rate limit exceeded. "
+                f"Please retry in {retry_after}s."
+            )
+        else:
+            detail = f"Too Many Requests: Rate limit quota exceeded for key '{key_info['name']}'. Please retry in {retry_after}s."
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too Many Requests: Rate limit quota exceeded for key '{key_info['name']}'. Please retry in {retry_after}s.",
+            detail=detail,
             headers=rate_headers,
         )
 
@@ -2659,10 +2678,10 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
     # Step 3b: Exact-Match Response Cache Check (Redis with TTL)
     # -----------------------------------------------------------------------
     effective_max_tokens = request.max_tokens or 1000
-    # Scope the key per caller (API key / user / guest IP) and include
+    # Scope the key per caller (API key / user / guest identity) and include
     # max_tokens, so no caller can read a response generated for someone else.
     cache_key = build_cache_key(
-        scope=rate_bucket,
+        scope=caller_scope,
         alias=target,
         model=target,
         messages=messages_payload,

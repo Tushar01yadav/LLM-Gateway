@@ -65,6 +65,8 @@ def _reset_loop_bound_resources():
     REQUEST_COALESCER._in_flight.clear()
     RATE_LIMITER._lock = asyncio.Lock()
     RATE_LIMITER._redis_client = None
+    RATE_LIMITER._last_redis_fail = 0.0
+    RATE_LIMITER._mem_buckets.clear()
     RESPONSE_CACHE._redis = None
     COST_TRACKER._redis = None
     JOB_MANAGER._memory_queue = asyncio.Queue()
