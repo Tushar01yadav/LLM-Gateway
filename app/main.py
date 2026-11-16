@@ -69,6 +69,7 @@ from app.cost import (
     resolve_token_usage,
 )
 
+from app.body_limit import RequestBodyLimitMiddleware
 from app.jobs import JOB_MANAGER
 from app.guardrails import GUARDRAILS, AUDIT_LOGGER
 from app.metrics import latency_percentiles
@@ -883,6 +884,13 @@ app = FastAPI(
 
     lifespan=lifespan,
 
+)
+
+# Reuses the OWASP LLM10 payload-size setting so the limit is enforced before
+# route-level guards can be bypassed by chunked or unauthenticated requests.
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=GUARDRAILS.max_body_bytes if GUARDRAILS.enabled else None,
 )
 
 
