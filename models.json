@@ -27,7 +27,8 @@
     "cache_enabled": true,
     "cache_ttl_sec": 3600,
     "coalescing_enabled": true,
-    "default_daily_budget_usd": 5.0
+    "default_daily_budget_usd": 5.0,
+    "anonymous_ip_daily_budget_usd": 5.0
   },
   "concurrency": {
     "global_max_inflight": 50,

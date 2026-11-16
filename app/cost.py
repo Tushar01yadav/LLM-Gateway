@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -406,6 +407,42 @@ def estimate_request_cost(alias: str, model: str, messages: List[Dict[str, str]]
     )
 
 
+ANONYMOUS_IP_BUDGET_PREFIX = "anon-ip:"
+
+
+def anonymous_ip_budget_key(client_ip: str) -> str:
+    """Canonical daily-ledger key for one anonymous client IP."""
+    value = str(client_ip or "").strip()
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return f"{ANONYMOUS_IP_BUDGET_PREFIX}{value or 'unknown'}"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return f"{ANONYMOUS_IP_BUDGET_PREFIX}{address.compressed}"
+
+
+def get_anonymous_ip_daily_budget() -> float:
+    """Daily USD cap shared by every anonymous request from one client IP."""
+    raw = os.getenv("GATEWAY_ANONYMOUS_IP_DAILY_BUDGET_USD", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+        if value is not None and math.isfinite(value) and value >= 0:
+            return value
+    cost_cfg = get_models_config().get("cost_control", {})
+    for key in ("anonymous_ip_daily_budget_usd", "default_daily_budget_usd"):
+        try:
+            value = float(cost_cfg.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            return value
+    return 5.0
+
+
 def _database_epoch(cursor) -> float:
     cursor.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp())" if DATABASE_URL else "SELECT (julianday('now') - 2440587.5) * 86400")
     return float(cursor.fetchone()[0])
@@ -484,7 +521,8 @@ def reserve_budget_sync(key_id: str, key_name: str, daily_budget: float, amount:
 
 def settle_budget_sync(reservation_id: str, actual_cost: float, key_id: str, key_name: str,
                        alias: str, provider: str, model: str, prompt_tokens: int,
-                       completion_tokens: int, total_tokens: int) -> bool:
+                       completion_tokens: int, total_tokens: int,
+                       record_cost: bool = True) -> bool:
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     try:
         cursor = conn.cursor()
@@ -505,16 +543,20 @@ def settle_budget_sync(reservation_id: str, actual_cost: float, key_id: str, key
             "UPDATE budget_accounts SET reserved = CASE WHEN reserved > ? THEN reserved-? ELSE 0 END, spent = spent+? WHERE key_id = ? AND budget_date = ?",
             (reserved, reserved, actual_cost, str(key_id), day),
         )
-        cursor.execute(
-            """INSERT INTO cost_records
-               (key_id,key_name,alias,provider,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,timestamp)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (str(key_id), key_name, alias, provider, model, prompt_tokens, completion_tokens,
-             total_tokens, actual_cost, reserved_at),
-        )
+        if record_cost:
+            # IP-scoped accounts settle only their own ledger. Writing a second
+            # cost_record would double-count the same request in billing totals.
+            cursor.execute(
+                """INSERT INTO cost_records
+                   (key_id,key_name,alias,provider,model,prompt_tokens,completion_tokens,total_tokens,cost_usd,timestamp)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (str(key_id), key_name, alias, provider, model, prompt_tokens, completion_tokens,
+                 total_tokens, actual_cost, reserved_at),
+            )
         conn.commit()
         BUDGET_RESERVATIONS.labels("settled").inc()
-        BUDGET_COST_USD.labels("actual").observe(actual_cost)
+        if record_cost:
+            BUDGET_COST_USD.labels("actual").observe(actual_cost)
         return True
     except Exception:
         conn.rollback()
@@ -649,14 +691,44 @@ class CostTracker:
         )
         return (reservation_id if allowed else None), current
 
+    async def reserve_anonymous_ip_budget(self, client_ip: str, amount: float,
+                                          daily_budget: Optional[float] = None,
+                                          lease_seconds: float = 120.0) -> Tuple[Optional[str], float]:
+        """Reserve against the daily account shared by every guest from this IP."""
+        budget = get_anonymous_ip_daily_budget() if daily_budget is None else daily_budget
+        return await self.reserve_budget(
+            anonymous_ip_budget_key(client_ip), "anonymous_ip", budget, amount, lease_seconds
+        )
+
+    async def settle_anonymous_ip_budget(self, reservation_id: str, client_ip: str,
+                                         actual_cost: float) -> bool:
+        """Settle the IP ledger without emitting a second billing record."""
+        return await self.settle_budget(
+            reservation_id=reservation_id,
+            key_id=anonymous_ip_budget_key(client_ip),
+            key_name="anonymous_ip",
+            alias="",
+            provider="",
+            model="",
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            actual_cost=actual_cost,
+            record_cost=False,
+        )
+
+    async def release_anonymous_ip_budget(self, reservation_id: str, client_ip: str) -> bool:
+        return await self.release_budget(reservation_id, anonymous_ip_budget_key(client_ip))
+
     async def settle_budget(self, reservation_id: str, key_id: str, key_name: str, alias: str,
                             provider: str, model: str, prompt_tokens: int,
-                            completion_tokens: int, total_tokens: int, actual_cost: float) -> bool:
+                            completion_tokens: int, total_tokens: int, actual_cost: float,
+                            record_cost: bool = True) -> bool:
         settled = await asyncio.to_thread(
             settle_budget_sync, reservation_id, actual_cost, str(key_id), key_name,
-            alias, provider, model, prompt_tokens, completion_tokens, total_tokens,
+            alias, provider, model, prompt_tokens, completion_tokens, total_tokens, record_cost,
         )
-        if settled:
+        if settled and record_cost:
             self._total_cost_memory += actual_cost
             r_client = self.get_client()
             if r_client:

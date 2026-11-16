@@ -65,6 +65,7 @@ from app.cost import (
     build_cache_key,
     calculate_request_cost,
     estimate_request_cost,
+    get_anonymous_ip_daily_budget,
     resolve_token_usage,
 )
 
@@ -2634,6 +2635,7 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
         )
 
     key_daily_budget = float(key_info.get("daily_budget") or 5.0)
+    is_anonymous = not raw_key and not user
     # -----------------------------------------------------------------------
     # Step 3 in Pipeline: Validate & Input Guardrails (OWASP Top 10)
     # -----------------------------------------------------------------------
@@ -2788,6 +2790,34 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             headers=budget_headers if budget_headers else None,
         )
 
+    # Anonymous guests also reserve against a cap shared by every guest from
+    # the same client IP, so rotating guest identities cannot reset spend.
+    anonymous_ip_reservation_id = None
+    if is_anonymous:
+        anonymous_ip_cap = get_anonymous_ip_daily_budget()
+        anonymous_ip_reservation_id, anonymous_ip_spend = await COST_TRACKER.reserve_anonymous_ip_budget(
+            client_ip, estimated_cost, anonymous_ip_cap
+        )
+        if anonymous_ip_reservation_id is None:
+            await COST_TRACKER.release_budget(reservation_id, str(key_info["id"]))
+            logger.warning(
+                "[BUDGET] Anonymous IP '%s' rejected at atomic reservation; current daily commitment=$%.4f limit=$%.2f",
+                client_ip, anonymous_ip_spend, anonymous_ip_cap,
+            )
+            await TRAFFIC_BROADCASTER.broadcast("budget_blocked", {
+                "key_id": key_info["id"], "key_name": f"anonymous_ip:{client_ip}",
+                "current_spend": anonymous_ip_spend, "daily_budget": anonymous_ip_cap, "status_code": 429,
+            })
+            ip_budget_headers = {"X-Guest-ID": guest_id} if guest_id else None
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    "Budget exceeded: Anonymous client IP daily budget limit of "
+                    f"${anonymous_ip_cap:.2f} cannot reserve estimated request cost."
+                ),
+                headers=ip_budget_headers,
+            )
+
     # -----------------------------------------------------------------------
     # Step 4 in Pipeline: Request Coalescing & Global Concurrency Bulkhead
     # -----------------------------------------------------------------------
@@ -2811,9 +2841,13 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
             })
     except asyncio.CancelledError:
         await COST_TRACKER.release_budget(reservation_id, str(key_info["id"]))
+        if anonymous_ip_reservation_id:
+            await COST_TRACKER.release_anonymous_ip_budget(anonymous_ip_reservation_id, client_ip)
         raise
     except Exception as exc:
         await COST_TRACKER.release_budget(reservation_id, str(key_info["id"]))
+        if anonymous_ip_reservation_id:
+            await COST_TRACKER.release_anonymous_ip_budget(anonymous_ip_reservation_id, client_ip)
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         status_code = 502
         if isinstance(exc, HTTPException):
@@ -2900,7 +2934,20 @@ async def chat_endpoint(request: ChatRequest, request_http: Request, response: R
         actual_cost=cost_usd,
     )
     if not settled:
+        if anonymous_ip_reservation_id:
+            await COST_TRACKER.release_anonymous_ip_budget(anonymous_ip_reservation_id, client_ip)
         raise HTTPException(status_code=503, detail="Budget reservation expired before settlement; retry the request.")
+    if anonymous_ip_reservation_id:
+        ip_settled = await COST_TRACKER.settle_anonymous_ip_budget(
+            anonymous_ip_reservation_id, client_ip, cost_usd
+        )
+        if not ip_settled:
+            # The canonical cost record is already committed; the IP ledger only
+            # misses this one settlement and its lease is reclaimed on expiry.
+            logger.warning(
+                "[BUDGET] Anonymous IP reservation '%s' expired before settlement",
+                anonymous_ip_reservation_id,
+            )
     total_spent = await COST_TRACKER.get_total_spend()
     await TRAFFIC_BROADCASTER.broadcast("cost_updated", {
         "key_id": key_info["id"],
